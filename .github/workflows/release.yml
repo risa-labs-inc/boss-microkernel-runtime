@@ -1,0 +1,13 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    uses: risa-labs-inc/BossConsole-Releases/.github/workflows/microkernel-runtime-release.yml@main
+    secrets:
+      BOSS_REPO_ACCESS_TOKEN: ${{ secrets.BOSS_REPO_ACCESS_TOKEN }}
+      BOSS_STORE_PLUGIN_PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}

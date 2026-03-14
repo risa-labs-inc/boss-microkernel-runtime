@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "ai.rever.boss.microkernel.runtime",
+  "displayName": "Microkernel Runtime",
+  "version": "1.0.0",
+  "apiVersion": "1.0.0",
+  "mainClass": "ai.rever.boss.plugin.runtime.PluginProcessMainKt",
+  "type": "SERVICE",
+  "description": "Shared runtime for microkernel out-of-process plugin child JVMs",
+  "systemPlugin": true,
+  "isDynamic": false,
+  "canUnload": false,
+  "loadPriority": 0
+}
