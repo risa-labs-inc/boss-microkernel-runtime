@@ -52,16 +52,22 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump runtime version in plugin.json
-        if: ${{ inputs.version_increment != 'none' && inputs.version_increment != '' }}
+        # On push: always patch-bump so same-version re-publish doesn't 400
+        # against the plugin store. On dispatch: use the user's choice and
+        # honor 'none' to skip the bump.
+        if: ${{ github.event_name == 'push' || (inputs.version_increment != 'none' && inputs.version_increment != '') }}
+        env:
+          BUMP: ${{ inputs.version_increment || 'patch' }}
         run: |
           set -euo pipefail
           MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
           CURRENT=$(jq -r '.version' "$MANIFEST")
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          case "${{ inputs.version_increment }}" in
+          case "$BUMP" in
             patch) PATCH=$((PATCH + 1)) ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            *) echo "Invalid bump: $BUMP" && exit 1 ;;
           esac
           NEW="${MAJOR}.${MINOR}.${PATCH}"
           echo "Bumping runtime version: $CURRENT → $NEW"
