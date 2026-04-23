@@ -7,6 +7,7 @@
   "mainClass": "ai.rever.boss.plugin.runtime.PluginProcessMainKt",
   "type": "service",
   "description": "Shared runtime for microkernel out-of-process plugin child JVMs",
+  "minIpcVersion": "1.0.0",
   "systemPlugin": true,
   "isDynamic": false,
   "canUnload": false,

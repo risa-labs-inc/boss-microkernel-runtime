@@ -1,13 +1,184 @@
 name: Release
 
+# Self-contained release flow for the standalone microkernel runtime repo.
+# Builds the fatJar in this repo (no BossConsole checkout), publishes to
+# this repo's GitHub Releases, and registers the entry in the BOSS Plugin
+# Store via /github/metadata.
+#
+# Replaces the previous reusable-workflow approach
+# (BossConsole-Releases/.github/workflows/microkernel-runtime-release.yml)
+# now that the runtime owns its own build (Phase 2 of the migration).
+
 on:
+  # Manual-only during Phase 2 of the runtime-extraction migration.
+  # Phase 3 will re-add `push: branches: [main]` once the standalone
+  # build is verified end-to-end against a real plugin-store publish.
   workflow_dispatch:
-  push:
-    branches: [main]
+    inputs:
+      version_increment:
+        description: 'Version increment (patch/minor/major/none)'
+        required: false
+        default: 'patch'
+        type: choice
+        options: [patch, minor, major, none]
+      ipc_version:
+        description: 'IPC contract version to consume (defaults to gradle.properties)'
+        required: false
+        default: ''
+      bossconsole_release_tag:
+        description: 'BossConsole release tag to pull upstream jars from (default: latest)'
+        required: false
+        default: ''
+
+concurrency:
+  group: microkernel-runtime-release
+  cancel-in-progress: false
 
 jobs:
   release:
-    uses: risa-labs-inc/BossConsole-Releases/.github/workflows/microkernel-runtime-release.yml@main
-    secrets:
-      BOSS_REPO_ACCESS_TOKEN: ${{ secrets.BOSS_REPO_ACCESS_TOKEN }}
-      BOSS_STORE_PLUGIN_PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump runtime version in plugin.json
+        if: ${{ inputs.version_increment != 'none' && inputs.version_increment != '' }}
+        run: |
+          set -euo pipefail
+          MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
+          CURRENT=$(jq -r '.version' "$MANIFEST")
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ inputs.version_increment }}" in
+            patch) PATCH=$((PATCH + 1)) ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+          esac
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bumping runtime version: $CURRENT → $NEW"
+          tmp=$(mktemp)
+          jq --arg v "$NEW" '.version = $v' "$MANIFEST" > "$tmp"
+          mv "$tmp" "$MANIFEST"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$MANIFEST"
+          git commit -m "🔖 Bump runtime version to ${NEW} [skip ci]"
+          git push
+
+      - name: Resolve versions
+        id: versions
+        run: |
+          set -euo pipefail
+          MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
+          RUNTIME_VERSION=$(jq -r '.version' "$MANIFEST")
+          IPC_VERSION="${{ inputs.ipc_version }}"
+          if [[ -z "$IPC_VERSION" ]]; then
+            IPC_VERSION=$(grep '^ipc.version=' gradle.properties | cut -d= -f2)
+          fi
+          echo "runtime_version=$RUNTIME_VERSION" >> "$GITHUB_OUTPUT"
+          echo "ipc_version=$IPC_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Runtime version: $RUNTIME_VERSION"
+          echo "IPC version: $IPC_VERSION"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build fatJar
+        env:
+          CI: 'true'
+          UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
+        run: |
+          set -euo pipefail
+          # The downloadDeps task pulls upstream jars from the named tag, or
+          # /releases/latest/download if blank.
+          if [[ -n "$UPSTREAM_TAG" ]]; then
+            SRC="https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/${UPSTREAM_TAG}"
+            ./gradlew fatJar \
+              -Pruntime.version=${{ steps.versions.outputs.runtime_version }} \
+              -Pipc.version=${{ steps.versions.outputs.ipc_version }} \
+              -Pupstream.source="$SRC" \
+              --no-daemon
+          else
+            ./gradlew fatJar \
+              -Pruntime.version=${{ steps.versions.outputs.runtime_version }} \
+              -Pipc.version=${{ steps.versions.outputs.ipc_version }} \
+              --no-daemon
+          fi
+
+      - name: Compute SHA-256 + size
+        id: hash
+        run: |
+          set -euo pipefail
+          ./gradlew computeFatJarSha256 --no-daemon -q
+          SHA256=$(cat build/fatjar-sha256.txt)
+          SIZE=$(cat build/fatjar-size.txt)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA256"
+          echo "Size: $SIZE bytes"
+
+      - name: Stage release asset
+        id: asset
+        run: |
+          set -euo pipefail
+          SRC="build/libs/boss-microkernel-runtime-${{ steps.versions.outputs.runtime_version }}-all.jar"
+          if [[ ! -f "$SRC" ]]; then
+            echo "::error::fatJar not found at $SRC"
+            ls -lh build/libs/
+            exit 1
+          fi
+          echo "asset_path=$SRC" >> "$GITHUB_OUTPUT"
+          ls -lh "$SRC"
+
+      - name: Delete existing release (idempotent re-run)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "v${{ steps.versions.outputs.runtime_version }}" --yes 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.asset.outputs.asset_path }}
+          generate_release_notes: true
+          name: v${{ steps.versions.outputs.runtime_version }}
+          tag_name: v${{ steps.versions.outputs.runtime_version }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to BOSS Plugin Store
+        env:
+          PUBLISH_KEY: ${{ secrets.BOSS_STORE_PLUGIN_PUBLISH_KEY }}
+        run: |
+          set -euo pipefail
+          # GitHub release-asset CDN is eventually consistent; let it propagate
+          # before the server tries to range-request the JAR.
+          sleep 8
+          PAYLOAD=$(jq -n \
+            --arg url "${{ github.server_url }}/${{ github.repository }}" \
+            --arg sha256 "${{ steps.hash.outputs.sha256 }}" \
+            '{ githubUrl: $url, sha256: $sha256 }')
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://api.risaboss.com/functions/v1/plugin-store/github/metadata" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $PUBLISH_KEY" \
+            -d "$PAYLOAD")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          echo "Response: $BODY"
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "::error::Failed to publish to BOSS Plugin Store (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          echo "✅ Published to BOSS Plugin Store"

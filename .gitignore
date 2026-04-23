@@ -3,5 +3,8 @@ build/
 .kotlin/
 *.class
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 local.properties
 .DS_Store
+.idea/
+*.iml
