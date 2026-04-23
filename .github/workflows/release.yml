@@ -10,9 +10,15 @@ name: Release
 # now that the runtime owns its own build (Phase 2 of the migration).
 
 on:
-  # Manual-only during Phase 2 of the runtime-extraction migration.
-  # Phase 3 will re-add `push: branches: [main]` once the standalone
-  # build is verified end-to-end against a real plugin-store publish.
+  # Auto-release on push to main: Phase 3 verified the standalone build
+  # publishes end-to-end (v1.0.11 dispatched manually, downloaded JAR
+  # SHA-256 matches the store entry).
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'CLAUDE.md'
+      - 'README.md'
+      - '.gitignore'
   workflow_dispatch:
     inputs:
       version_increment:
