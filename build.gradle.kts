@@ -56,7 +56,7 @@ repositories {
 // CI: jars downloaded into build/downloaded-deps/ by the `downloadDeps`
 // task before compile.
 val useLocalDependencies: Boolean = (System.getenv("CI") != "true") &&
-    file("../../BossConsole/build/upstream-artifacts/boss-ipc-1.0.0.jar").exists()
+    file("../../BossConsole/build/upstream-artifacts/boss-ipc-1.1.0.jar").exists()
 
 val upstreamJarDir: File = if (useLocalDependencies) {
     file("../../BossConsole/build/upstream-artifacts")
@@ -64,13 +64,18 @@ val upstreamJarDir: File = if (useLocalDependencies) {
     file("build/downloaded-deps")
 }
 
-val ipcVersion: String = providers.gradleProperty("ipc.version").orElse("1.0.0").get()
+// boss-ipc tracks the IPC wire-format version (semver per IpcVersion bump policy).
+// The other contract jars (boss-ui-sdk, plugin-api-core, plugin-api-ipc) are
+// versioned independently. Split so a minor IPC bump like 1.0.0 → 1.1.0 does
+// not falsely imply the other jars rev'd too.
+val bossIpcVersion: String = providers.gradleProperty("bossIpc.version").orElse("1.1.0").get()
+val contractVersion: String = providers.gradleProperty("contract.version").orElse("1.0.0").get()
 
 val upstreamJars = listOf(
-    "boss-ipc-$ipcVersion.jar",
-    "boss-ui-sdk-$ipcVersion.jar",
-    "plugin-api-core-$ipcVersion.jar",
-    "plugin-api-ipc-$ipcVersion.jar",
+    "boss-ipc-$bossIpcVersion.jar",
+    "boss-ui-sdk-$contractVersion.jar",
+    "plugin-api-core-$contractVersion.jar",
+    "plugin-api-ipc-$contractVersion.jar",
 )
 
 dependencies {
