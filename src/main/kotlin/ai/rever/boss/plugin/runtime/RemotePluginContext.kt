@@ -38,6 +38,8 @@ import ai.rever.boss.plugin.ipc.SettingsProviderProxy
 import ai.rever.boss.plugin.ipc.SplitViewOperationsProxy
 import ai.rever.boss.plugin.ipc.SupabaseDataProviderProxy
 import ai.rever.boss.plugin.ipc.WorkspaceDataProviderProxy
+import ai.rever.boss.ipc.BossIpcServer
+import io.grpc.BindableService
 import io.grpc.ManagedChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +68,15 @@ class RemotePluginContext(
     val uiService: PluginUIServiceImpl,
     private val kernelChannel: ManagedChannel,
     private val eventBusChannel: ManagedChannel? = null,
+    /**
+     * The gRPC server hosted by this plugin's child JVM. Plugins that
+     * need to expose their own services (e.g. a terminal plugin hosting
+     * `TerminalService`) call [addProcessService] to register them
+     * before the server starts. Nullable so existing call sites that
+     * construct [RemotePluginContext] without a server reference keep
+     * compiling — those plugins simply can't add services.
+     */
+    private val processServer: BossIpcServer? = null,
 ) {
     private val logger = LoggerFactory.getLogger(RemotePluginContext::class.java)
 
@@ -263,6 +274,32 @@ class RemotePluginContext(
             .setProcessId(processId)
             .build()
         uiService.registerSurface(registration)
+    }
+
+    /**
+     * Register a custom gRPC service on this plugin's child-process server.
+     *
+     * Plugins that expose their own contract (e.g. a terminal plugin
+     * hosting `TerminalService`, an editor plugin hosting an LSP-bridge
+     * service, etc.) call this from `registerRemote(ctx)` before
+     * [PluginProcessMain] starts the server. The service becomes
+     * reachable by the host on this process's IPC address.
+     *
+     * Throws [IllegalStateException] if this context was constructed
+     * without a server reference (e.g. unit-test fixtures).
+     */
+    fun addProcessService(service: BindableService) {
+        val server = processServer
+            ?: throw IllegalStateException(
+                "addProcessService called on a RemotePluginContext without a process server. " +
+                    "This usually means the context was built outside PluginProcessMain — " +
+                    "custom services can only be registered in OOP plugin child JVMs."
+            )
+        logger.info(
+            "Registering custom process service: {}",
+            service.bindService().serviceDescriptor.name,
+        )
+        server.addService(service)
     }
 
     /**

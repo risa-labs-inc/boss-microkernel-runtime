@@ -87,10 +87,14 @@ fun main() = runBlocking {
     connection.processServer.addService(uiService)
 
     // 5. Create RemotePluginContext with kernel channel for data provider access
+    //    and a reference to this process's gRPC server so plugins can register
+    //    their own services via `ctx.addProcessService(...)` (e.g. the terminal
+    //    plugin hosting `TerminalService` for the host's grid renderer).
     val remoteContext = RemotePluginContext(
         processId = bootstrap.processId,
         uiService = uiService,
         kernelChannel = connection.kernelClient.channel,
+        processServer = connection.processServer,
     )
 
     // 6. Load and initialize the plugin's state holder (if declared)
