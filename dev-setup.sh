@@ -4,8 +4,8 @@
 # `useLocalDependencies` branch at them.
 #
 # Layout assumed:
-#   ~/Development/BossConsole               (sibling)
-#   ~/Development/boss_plugin/boss-microkernel-runtime  (this repo)
+#   ~/Development/Boss/BossConsole                       (sibling)
+#   ~/Development/Boss/boss_plugins/boss-microkernel-runtime  (this repo)
 #
 # Override with BOSSCONSOLE_DIR=/path/to/BossConsole.
 set -euo pipefail
