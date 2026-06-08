@@ -66,7 +66,12 @@ import org.slf4j.LoggerFactory
 class RemotePluginContext(
     val processId: String,
     val uiService: PluginUIServiceImpl,
-    private val kernelChannel: ManagedChannel,
+    /**
+     * Channel to the kernel's gRPC server. Exposed (not private) so OOP state holders
+     * that talk to kernel services directly — e.g. the analytics holder subscribing to
+     * [ai.rever.boss.ipc.proto.EventBusServiceGrpcKt] — can build their own stubs.
+     */
+    val kernelChannel: ManagedChannel,
     private val eventBusChannel: ManagedChannel? = null,
     /**
      * The gRPC server hosted by this plugin's child JVM. Plugins that
