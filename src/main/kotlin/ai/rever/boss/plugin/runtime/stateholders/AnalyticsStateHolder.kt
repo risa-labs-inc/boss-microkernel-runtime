@@ -7,9 +7,12 @@ import ai.rever.boss.plugin.runtime.PluginStateHolder
 import ai.rever.boss.plugin.runtime.RemotePluginContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -107,22 +110,20 @@ class AnalyticsStateHolder :
 
     private fun startCollector(ctx: RemotePluginContext) {
         val stub = EventBusServiceGrpcKt.EventBusServiceCoroutineStub(ctx.kernelChannel)
-        val buffer = ArrayList<CanonicalEvent>(BATCH_SIZE)
+        val incoming = Channel<CanonicalEvent>(CAPACITY)
 
+        // Producer: subscribe to the kernel event stream and feed mapped events into the
+        // channel, reconnecting with backoff. Consent is gated at ingestion so a disabled
+        // session buffers nothing.
         scope.launch {
             var delayMs = 1_000L
             while (isActive) {
                 try {
                     val request = SubscribeRequest.newBuilder().setSubscriberId("analytics").build()
                     stub.subscribe(request).collect { envelope ->
-                        val cfg = loadConfig()
-                        if (!cfg.consentEnabled) return@collect
+                        if (!loadConfig().consentEnabled) return@collect
                         val event = mapEnvelope(envelope) ?: return@collect
-                        buffer.add(event)
-                        if (buffer.size >= BATCH_SIZE) {
-                            val batch = ArrayList(buffer); buffer.clear()
-                            flush(batch, cfg, ctx)
-                        }
+                        incoming.trySend(event)
                     }
                     delayMs = 1_000L
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -132,6 +133,36 @@ class AnalyticsStateHolder :
                     delay(delayMs)
                     delayMs = (delayMs * 2).coerceAtMost(30_000L)
                 }
+            }
+        }
+
+        // Consumer: flush when BATCH_SIZE accumulates OR BATCH_INTERVAL_MS elapses (mirrors the
+        // in-process AnalyticsDispatcher) so low-traffic sessions don't strand < BATCH_SIZE events.
+        scope.launch {
+            val buffer = ArrayList<CanonicalEvent>(BATCH_SIZE)
+            while (isActive) {
+                val event = if (buffer.isEmpty()) {
+                    incoming.receiveCatching().getOrNull() ?: break
+                } else {
+                    select<CanonicalEvent?> {
+                        incoming.onReceiveCatching { it.getOrNull() }
+                        onTimeout(BATCH_INTERVAL_MS) { null }
+                    }
+                }
+                if (event != null) {
+                    buffer.add(event)
+                    if (buffer.size < BATCH_SIZE) continue
+                }
+                if (buffer.isNotEmpty()) {
+                    val cfg = loadConfig()
+                    if (cfg.consentEnabled) flush(ArrayList(buffer), cfg, ctx)
+                    buffer.clear()
+                }
+            }
+            // Drain whatever is buffered on shutdown.
+            if (buffer.isNotEmpty()) {
+                val cfg = loadConfig()
+                if (cfg.consentEnabled) flush(ArrayList(buffer), cfg, ctx)
             }
         }
     }
@@ -263,6 +294,8 @@ class AnalyticsStateHolder :
 
     companion object {
         private const val BATCH_SIZE = 20
+        private const val BATCH_INTERVAL_MS = 10_000L
         private const val MAX_RETRIES = 3
+        private const val CAPACITY = 1_000
     }
 }
