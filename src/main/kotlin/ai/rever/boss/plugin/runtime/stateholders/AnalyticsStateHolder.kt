@@ -104,7 +104,7 @@ class AnalyticsStateHolder :
     private fun bootstrap() {
         val cfg = loadConfig()
         updateState {
-            copy(consentEnabled = cfg.consentEnabled, posthogConfigured = effectiveApiKey(cfg).isNotBlank())
+            copy(consentEnabled = effectiveConsent(cfg), posthogConfigured = effectiveApiKey(cfg).isNotBlank())
         }
     }
 
@@ -121,7 +121,7 @@ class AnalyticsStateHolder :
                 try {
                     val request = SubscribeRequest.newBuilder().setSubscriberId("analytics").build()
                     stub.subscribe(request).collect { envelope ->
-                        if (!loadConfig().consentEnabled) return@collect
+                        if (!effectiveConsent(loadConfig())) return@collect
                         val event = mapEnvelope(envelope) ?: return@collect
                         incoming.trySend(event)
                     }
@@ -155,7 +155,7 @@ class AnalyticsStateHolder :
                 }
                 if (buffer.isNotEmpty()) {
                     val cfg = loadConfig()
-                    if (cfg.consentEnabled) flush(ArrayList(buffer), cfg, ctx)
+                    if (effectiveConsent(cfg)) flush(ArrayList(buffer), cfg, ctx)
                     buffer.clear()
                 }
             }
@@ -269,7 +269,7 @@ class AnalyticsStateHolder :
         val next = transform(loadConfig())
         persist(next)
         updateState {
-            copy(consentEnabled = next.consentEnabled, posthogConfigured = effectiveApiKey(next).isNotBlank())
+            copy(consentEnabled = effectiveConsent(next), posthogConfigured = effectiveApiKey(next).isNotBlank())
         }
     }
 
@@ -279,6 +279,18 @@ class AnalyticsStateHolder :
             configFile.writeText(json.encodeToString(AnalyticsConfigDto.serializer(), cfg))
         }
     }
+
+    /**
+     * Effective consent: the persisted toggle AND the env/system-property kill switch
+     * (`BOSS_ANALYTICS_DISABLED` / `boss.analytics.disabled`). Mirrors the in-process
+     * [ai.rever.boss.plugin.dynamic.analytics.config.AnalyticsConfig.withOverrides] so an
+     * ops-level disable works identically in either process.
+     */
+    private fun effectiveConsent(cfg: AnalyticsConfigDto): Boolean = cfg.consentEnabled && !analyticsDisabled()
+
+    private fun analyticsDisabled(): Boolean =
+        (System.getenv("BOSS_ANALYTICS_DISABLED") ?: System.getProperty("boss.analytics.disabled"))
+            ?.equals("true", ignoreCase = true) == true
 
     private fun effectiveApiKey(cfg: AnalyticsConfigDto): String =
         System.getenv("BOSS_ANALYTICS_POSTHOG_KEY")
