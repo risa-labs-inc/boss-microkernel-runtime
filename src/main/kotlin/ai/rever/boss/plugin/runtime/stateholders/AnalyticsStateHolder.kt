@@ -28,6 +28,7 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 // region State / Intent
 //
@@ -81,7 +82,7 @@ class AnalyticsStateHolder :
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
 
     private var context: RemotePluginContext? = null
-    @Volatile private var sent: Long = 0
+    private val sentCount = AtomicLong(0)
 
     constructor(scope: CoroutineScope) : super(AnalyticsState(), scope) {
         bootstrap()
@@ -162,7 +163,7 @@ class AnalyticsStateHolder :
             // Drain whatever is buffered on shutdown.
             if (buffer.isNotEmpty()) {
                 val cfg = loadConfig()
-                if (cfg.consentEnabled) flush(ArrayList(buffer), cfg, ctx)
+                if (effectiveConsent(cfg)) flush(ArrayList(buffer), cfg, ctx)
             }
         }
     }
@@ -194,10 +195,15 @@ class AnalyticsStateHolder :
         var attempt = 0
         var backoff = 1_000L
         while (true) {
-            val ok = runCatching { post(url, payload) }.getOrDefault(false)
+            val ok = try {
+                post(url, payload)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                false
+            }
             if (ok) {
-                sent += batch.size
-                updateState { copy(eventsSent = sent) }
+                updateState { copy(eventsSent = sentCount.addAndGet(batch.size.toLong())) }
                 return
             }
             if (++attempt > MAX_RETRIES) {
