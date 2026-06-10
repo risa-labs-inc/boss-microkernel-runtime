@@ -52,26 +52,33 @@ sealed class AnalyticsIntent {
 // endregion
 
 /**
- * Out-of-process analytics brain.
+ * Out-of-process analytics brain — **EXPERIMENTAL, not at parity with the in-process
+ * pipeline.** The analytics plugin currently ships `isolationMode: in-process`, so this
+ * class is not on the live path. Do not flip the manifest to out-of-process without
+ * closing the gaps below.
  *
- * Loaded by `PluginProcessMain` (via `plugin.json#stateHolderClass`) when the analytics
- * plugin runs out-of-process. It owns the full pipeline for the OOP path:
+ * Loaded by `PluginProcessMain` (via `plugin.json#stateHolderClass`) if/when the analytics
+ * plugin runs out-of-process. It currently:
  *
  * 1. Subscribes to the kernel's [EventBusServiceGrpcKt] cross-process event stream over
  *    [RemotePluginContext.kernelChannel].
- * 2. Maps each [EventEnvelope] into a canonical analytics event name.
- * 3. Applies a mandatory PII scrub.
- * 4. Batches and POSTs to PostHog via the JDK HTTP client.
+ * 2. Maps each [EventEnvelope] into a canonical analytics event name (kind only).
+ * 3. Batches and POSTs to PostHog via the JDK HTTP client.
  *
  * Config (consent, PostHog key/host, anonymous id) is read from and written to the same
- * `~/.boss/analytics/config.json` the in-process plugin and the consent panel use, so
- * the two pipelines are interchangeable and the UI works in either process.
+ * `~/.boss/analytics/config.json` the in-process plugin and the consent panel use.
  *
- * NOTE: the scrubbing/dispatch logic here intentionally mirrors the canonical, unit-tested
- * implementation in the analytics plugin's `core/` package
- * (`ai.rever.boss.plugin.dynamic.analytics.core`). They are duplicated because the runtime
- * and the plugin jar are loaded by different classloaders; the clean follow-up is to
- * extract an `analytics-core` artifact both depend on. Keep the two in sync until then.
+ * NOT-AT-PARITY GAPS (see the analytics plugin's `CLAUDE.md`, "Out-of-process status"):
+ * - **Disjoint event source.** This subscribes to `EventBusService`, which the host's
+ *   `IpcEventBridge` feeds with a *different* event family (dashboard/panel/run/keyboard/
+ *   url/nav) than the in-process collector's `ApplicationEventBus` (auth/tab/file/...).
+ *   `ApplicationEventBus` is not bridged here, and `track()` product events never arrive.
+ * - **No PII sanitizer.** There is no equivalent of the plugin's `core/PiiSanitizer`.
+ *   [mapEnvelope] is only safe because it emits empty properties — DO NOT carry event
+ *   properties across without porting the sanitizer first (BOSS runs in healthcare
+ *   contexts). The canonical, unit-tested scrub/dispatch logic lives in the plugin's
+ *   `core/` package (`ai.rever.boss.plugin.dynamic.analytics.core`); the clean follow-up
+ *   is a shared `analytics-core` artifact both can depend on.
  */
 class AnalyticsStateHolder :
     PluginStateHolder<AnalyticsState, AnalyticsIntent, Nothing> {
@@ -168,7 +175,7 @@ class AnalyticsStateHolder :
         }
     }
 
-    // region Mapping + scrubbing (mirror of the plugin core)
+    // region Mapping (event kind only — NO property capture, NO PII scrub; see class KDoc)
 
     private data class CanonicalEvent(val name: String, val properties: Map<String, Any?>, val timestampMs: Long)
 
