@@ -101,12 +101,16 @@ dependencies {
     // need to resolve to the same coordinates here for a self-contained
     // child JVM classpath. We also need them at compile time because the
     // generated stubs in boss-ipc reference them.
+    // protobuf must be >= the protobuf pin in BossConsole's libs.versions.toml:
+    // the boss-ipc gencode is generated with that version and the protobuf
+    // runtime refuses to load gencode newer than itself (child JVM dies at
+    // startup with ProtobufRuntimeVersionException). Keep in lockstep.
     implementation("io.grpc:grpc-netty:1.72.0")
     implementation("io.grpc:grpc-protobuf:1.72.0")
     implementation("io.grpc:grpc-stub:1.72.0")
     implementation("io.grpc:grpc-kotlin-stub:1.4.3")
-    implementation("com.google.protobuf:protobuf-java:4.31.1")
-    implementation("com.google.protobuf:protobuf-kotlin:4.31.1")
+    implementation("com.google.protobuf:protobuf-java:4.35.1")
+    implementation("com.google.protobuf:protobuf-kotlin:4.35.1")
     implementation("io.netty:netty-transport-native-unix-common:4.2.6.Final")
     implementation("io.netty:netty-transport-native-kqueue:4.2.6.Final:osx-aarch_64")
     implementation("io.netty:netty-transport-native-kqueue:4.2.6.Final:osx-x86_64")
