@@ -213,6 +213,40 @@ tasks.register("downloadDeps") {
     }
 }
 
+// ─── downloadApiContract: pull boss-plugin-api from its own release repo ───
+//
+// Separate from downloadDeps because it comes from a different repository: the BossConsole
+// contract jars share one release base URL, this one does not.
+tasks.register("downloadApiContract") {
+    group = "build setup"
+    description = "Download the pinned boss-plugin-api jar (CI / fresh-clone use)."
+    val dest = bossPluginApiJar
+    val version = bossPluginApiVersion
+    val name = bossPluginApiJarName
+    outputs.file(dest)
+    doLast {
+        if (dest.exists() && dest.length() > 0) {
+            logger.lifecycle("✓ already present: ${dest.name} (${dest.length() / 1024} KB)")
+            return@doLast
+        }
+        dest.parentFile.mkdirs()
+        val url = "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v$version/$name"
+        logger.lifecycle("↓ $url")
+        val conn = URI(url).toURL().openConnection().apply {
+            setRequestProperty("User-Agent", "boss-microkernel-runtime-build/1.0")
+            connectTimeout = 30_000
+            readTimeout = 120_000
+        }
+        conn.getInputStream().use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!dest.exists() || dest.length() == 0L) {
+            throw GradleException("Failed to download $name from $url")
+        }
+        logger.lifecycle("  ${dest.length() / 1024} KB")
+    }
+}
+
 tasks.named("compileKotlin") {
     if (!useLocalDependencies) {
         dependsOn("downloadDeps")
