@@ -12,6 +12,8 @@ import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import io.grpc.Server
 import io.grpc.ServerBuilder
+import io.grpc.Status
+import io.grpc.StatusException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,6 +63,10 @@ class PluginUiClientTest {
     /** The kernel's half: records what the plugin sent, and can push events back down the stream. */
     private class FakeKernelUi(
         private val accept: Boolean = true,
+        /** How many of the first StreamUI calls should break instead of staying open. */
+        private val failFirstStreams: Int = 0,
+        /** When true, StreamUI completes normally instead of staying open — the host is done. */
+        private val completeStreams: Boolean = false,
     ) : PluginUIServiceGrpcKt.PluginUIServiceCoroutineImplBase() {
         val registered = ConcurrentLinkedQueue<UIRegistration>()
         val unregistered = ConcurrentLinkedQueue<String>()
@@ -86,6 +92,14 @@ class PluginUiClientTest {
                     launch {
                         requests.collect { updates += it }
                     }
+                if (streamsOpened.size <= failFirstStreams) {
+                    pump.cancel()
+                    throw StatusException(Status.UNAVAILABLE.withDescription("kernel restarting"))
+                }
+                if (completeStreams) {
+                    pump.cancel()
+                    return@channelFlow
+                }
                 outbound.collect { send(it) }
                 pump.cancel()
             }
@@ -286,11 +300,41 @@ class PluginUiClientTest {
             }
         }
 
+    @Test
+    fun `a broken stream is recovered by registering again, not by re-dialling`() =
+        runBlocking {
+            // The call ending takes the kernel-side registration with it, so a bare reconnect would
+            // stream into a surface the kernel no longer knows about.
+            val kernel = FakeKernelUi(failFirstStreams = 1)
+            start(kernel).registerSurface(panel())
+
+            awaitTrue("the surface should be registered a second time, not just re-streamed") {
+                kernel.registered.size >= 2 && kernel.streamsOpened.size >= 2
+            }
+        }
+
+    @Test
+    fun `a stream the kernel ends cleanly is not reopened`() =
+        runBlocking {
+            // A clean end is the host saying it is done with this surface — an UnregisterUI from its
+            // side, or the user closing the panel. Re-registering would resurrect it.
+            val kernel = FakeKernelUi(completeStreams = true)
+            start(kernel).registerSurface(panel())
+
+            awaitTrue("the first cycle should have completed") { kernel.streamsOpened.isNotEmpty() }
+            delay(RECOVERY_SETTLE_MS)
+            assertEquals(1, kernel.registered.size, "a surface the kernel finished must not be re-registered")
+            assertEquals(1, kernel.streamsOpened.size, "and must not be re-streamed")
+        }
+
     private companion object {
         const val WAIT_MS = 10_000L
         const val POLL_MS = 20L
 
         /** Long enough for a stream that should never open to have opened, short enough to run often. */
         const val SETTLE_MS = 400L
+
+        /** Comfortably past the client's 1s retry delay, so a reopen would have happened by now. */
+        const val RECOVERY_SETTLE_MS = 2_000L
     }
 }

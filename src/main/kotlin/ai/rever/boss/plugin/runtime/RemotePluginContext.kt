@@ -252,15 +252,18 @@ class RemotePluginContext(
      *
      * Returns as soon as the claim is queued — registration is a round trip to the kernel now, so
      * an update pushed immediately after is buffered until the stream for this surface opens.
-     * Supplying [initialTree] means the surface renders from the moment the kernel accepts it,
-     * instead of showing empty until the plugin's first push.
+     *
+     * A surface that wants to render before its first push can build its own `UIRegistration` with
+     * an `initial_tree` and hand it to [uiService] directly. This overload deliberately does not
+     * take one: adding a parameter here changes the JVM descriptor, and plugin JARs are versioned
+     * independently of the runtime, so an already-built plugin calling the old signature would get
+     * a NoSuchMethodError in the child JVM.
      */
     fun registerPanel(
         surfaceId: String,
         displayName: String,
         iconName: String = "",
         defaultSlot: String = "",
-        initialTree: ai.rever.boss.ipc.proto.WidgetTree? = null,
     ) {
         logger.info("Registering panel: id={}, name={}, slot={}", surfaceId, displayName, defaultSlot)
         val registration = ai.rever.boss.ipc.proto.UIRegistration.newBuilder()
@@ -270,7 +273,6 @@ class RemotePluginContext(
             .setIconName(iconName)
             .setProcessId(processId)
             .setDefaultSlot(defaultSlot)
-            .apply { initialTree?.let { setInitialTree(it) } }
             .build()
         uiService.registerSurface(registration)
     }
@@ -281,7 +283,6 @@ class RemotePluginContext(
     fun registerTabType(
         surfaceId: String,
         displayName: String,
-        initialTree: ai.rever.boss.ipc.proto.WidgetTree? = null,
     ) {
         logger.info("Registering tab type: id={}, name={}", surfaceId, displayName)
         val registration = ai.rever.boss.ipc.proto.UIRegistration.newBuilder()
@@ -289,7 +290,6 @@ class RemotePluginContext(
             .setSurfaceType("tab")
             .setDisplayName(displayName)
             .setProcessId(processId)
-            .apply { initialTree?.let { setInitialTree(it) } }
             .build()
         uiService.registerSurface(registration)
     }
@@ -326,8 +326,10 @@ class RemotePluginContext(
      */
     fun dispose() {
         logger.info("RemotePluginContext disposed for process: {}", processId)
-        // Before cancelling the scope: the UI streams run on it, and ending them is what tells the
-        // kernel these surfaces are gone.
+        // The UI client owns its own scope, so this is not covered by cancelling [job] below —
+        // and ending those streams is the only notice the kernel gets that these surfaces are gone.
+        // Cancelling the calls is enough for that; an UnregisterUI per surface would be a round trip
+        // to a host we are in the middle of disconnecting from.
         uiService.close()
         job.cancel()
     }

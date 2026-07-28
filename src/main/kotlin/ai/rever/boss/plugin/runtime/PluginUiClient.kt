@@ -9,6 +9,7 @@ import ai.rever.boss.ipc.proto.WidgetUpdate
 import io.grpc.ManagedChannel
 import io.grpc.Status
 import io.grpc.StatusException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -64,6 +66,10 @@ class PluginUiClient(
 
     private val surfaces = ConcurrentHashMap<String, Surface>()
 
+    /** Terminal: [close] has run, and this client will not claim anything else. */
+    @Volatile
+    private var shutdown = false
+
     /**
      * One surface's half of the transport.
      *
@@ -78,16 +84,27 @@ class PluginUiClient(
         val lock = Mutex()
         @Volatile var pump: Job? = null
         @Volatile var closed = false
+
+        /** Set once [MAX_ATTEMPTS] is exhausted: nothing is collecting [updates] any more. */
+        @Volatile var gaveUp = false
     }
 
     /**
      * Claim a surface with the kernel and start streaming it.
      *
      * Non-suspending because plugin code registers panels from ordinary setup functions; the work is
-     * launched on the plugin scope. Failures are logged — a surface the kernel refused is a surface
+     * launched on the client's scope. Failures are logged — a surface the kernel refused is a surface
      * that will not render, and there is nothing the caller can do about it inline.
+     *
+     * Re-registering a surface that is **already streaming** updates what [registrations] reports but
+     * does not tell the kernel: delivering the change would mean tearing the stream down and
+     * re-registering, which blanks the surface. Unregister first if a live surface has to change.
      */
     fun registerSurface(registration: UIRegistration) {
+        if (shutdown) {
+            logger.warn("Ignoring registration for {} — this client is closed", registration.surfaceId)
+            return
+        }
         val surface = surfaces.compute(registration.surfaceId) { _, existing ->
             existing?.also { it.registration = registration } ?: Surface(registration)
         }!!
@@ -100,6 +117,15 @@ class PluginUiClient(
         if (surface == null) {
             logger.warn(
                 "Dropping a widget update for an unregistered surface: {} — call registerPanel/registerTabType first",
+                update.surfaceId,
+            )
+            return
+        }
+        if (surface.gaveUp) {
+            // A MutableSharedFlow with no collector never suspends — it overwrites the replay slot
+            // and returns. Without this the plugin keeps rendering into a void, silently.
+            logger.warn(
+                "Widget update for {} goes nowhere: this surface was given up on after repeated failures",
                 update.surfaceId,
             )
             return
@@ -128,6 +154,7 @@ class PluginUiClient(
      * notice — so this runs before the plugin's own scope is cancelled.
      */
     fun close() {
+        shutdown = true
         surfaces.values.forEach { it.closed = true }
         surfaces.clear()
         job.cancel()
@@ -145,67 +172,98 @@ class PluginUiClient(
         }
     }
 
+    /** How one register-and-stream cycle ended, which is what decides whether to try again. */
+    private enum class Cycle {
+        /** The kernel ended the stream cleanly. It is done with this surface; do not re-register. */
+        FINISHED,
+
+        /** Something broke. Worth another attempt, but a bounded number of them. */
+        FAILED,
+    }
+
     /**
-     * Keep this surface registered and streaming for as long as the plugin wants it.
+     * Keep this surface registered and streaming for as long as the kernel wants it.
      *
      * A stream that ends takes the kernel-side registration with it, so recovery is
-     * register-then-reopen, not reconnect. Retries are bounded and spaced: a kernel that refuses the
-     * surface id (another process holds it) refuses it every time, and hammering that would be a
-     * busy loop against a permanent answer.
+     * register-then-reopen, not reconnect. Two things bound that:
+     *
+     * A **clean** end is the kernel saying it is finished with the surface — an `UnregisterUI` from
+     * the host side, or the surface being closed — so it stops here. Re-registering would undo a
+     * decision the host just made, and the surface would come back after the user closed it.
+     *
+     * A **failed** cycle counts against [MAX_ATTEMPTS] whether or not the stream ever opened. The
+     * counter deliberately does not reset on a cycle that got as far as streaming: with the kernel
+     * down, `registerUI` throws every second forever, per surface, for the life of the child JVM —
+     * and the process most likely to be down is the one that spawned us.
      */
     private suspend fun runStream(surface: Surface) {
         var attempt = 0
         while (scope.isActive && !surface.closed && attempt < MAX_ATTEMPTS) {
-            val opened = registerAndStream(surface)
+            if (registerAndStream(surface) == Cycle.FINISHED) return
             if (surface.closed) return
-            attempt = if (opened) 0 else attempt + 1
+            attempt++
             if (attempt >= MAX_ATTEMPTS) break
             delay(RETRY_DELAY_MS)
         }
         if (attempt >= MAX_ATTEMPTS) {
+            surface.gaveUp = true
             logger.error(
-                "Giving up on UI surface {} after {} failed attempts — it will not render",
+                "Giving up on UI surface {} after {} failed attempts — it will not render, " +
+                    "and further widget updates for it go nowhere",
                 surface.registration.surfaceId,
                 MAX_ATTEMPTS,
             )
         }
     }
 
-    /**
-     * One register-and-stream cycle. Returns true if the stream was actually established, so the
-     * caller can tell a working surface that later dropped from one that never opened.
-     */
-    private suspend fun registerAndStream(surface: Surface): Boolean {
+    /** One register-and-stream cycle. */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun registerAndStream(surface: Surface): Cycle {
         val surfaceId = surface.registration.surfaceId
         return try {
             val response = stub.registerUI(surface.registration)
             if (!response.success) {
                 logger.error("Kernel refused UI surface {}: {}", surfaceId, response.errorMessage)
-                return false
+                return Cycle.FAILED
             }
             logger.info("Registered UI surface with the kernel: {}", surfaceId)
 
-            // Bind the call: StreamUI has no surface id of its own and takes it from the first
-            // update, so one is seeded here rather than waiting for the plugin to push. Seeding with
-            // the registration's own tree keeps what the kernel already rendered at RegisterUI.
-            //
-            // Prepended to the flow rather than emitted into `updates`: that buffer replays one
-            // element, so pushing the binding update through it would evict a tree the plugin sent
-            // while the stream was still opening — losing exactly the first render.
-            val outbound =
-                flow {
-                    emit(bindingUpdate(surface.registration))
-                    emitAll(surface.updates)
-                }
-
-            stub.streamUI(outbound).collect { event -> _uiEvents.emit(event) }
-            logger.info("UI stream for {} completed", surfaceId)
-            true
+            stub.streamUI(outboundFor(surface)).collect { event -> _uiEvents.emit(event) }
+            logger.info("UI stream for {} completed — the kernel is done with this surface", surfaceId)
+            Cycle.FINISHED
+        } catch (e: CancellationException) {
+            // Our own shutdown, or the scope going away. Not a transport failure, and rethrowing is
+            // what keeps cancellation cooperative.
+            throw e
         } catch (e: StatusException) {
             reportStreamFailure(surfaceId, e)
-            e.status.code != Status.Code.CANCELLED
+            Cycle.FAILED
+        } catch (e: Exception) {
+            // A shut-down channel, a failure inside the outbound flow, anything else. Without this
+            // the coroutine dies under the SupervisorJob: the surface stops streaming for good, with
+            // no re-register and nothing in the log but a stack trace on stderr.
+            logger.warn("UI stream for {} failed unexpectedly — will re-register", surfaceId, e)
+            Cycle.FAILED
         }
     }
+
+    /**
+     * What this surface sends, starting with the update that binds the call.
+     *
+     * `StreamUI` has no surface id of its own and takes it from the first update, so one is seeded
+     * rather than waiting for the plugin to push. The seed is the tree the surface is *currently*
+     * showing where there is one — on a re-open the registration's tree is stale, and binding with
+     * it would render a blank or old frame before the replay corrects it.
+     *
+     * Prepended rather than emitted into [Surface.updates]: that buffer replays one element, so
+     * pushing the binding update through it would evict a tree the plugin sent while the stream was
+     * still opening — losing exactly the first render.
+     */
+    private fun outboundFor(surface: Surface): Flow<WidgetUpdate> =
+        flow {
+            emit(surface.updates.replayCache.firstOrNull() ?: bindingUpdate(surface.registration))
+            emitAll(surface.updates)
+        }
 
     private fun reportStreamFailure(
         surfaceId: String,
