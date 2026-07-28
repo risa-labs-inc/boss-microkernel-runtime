@@ -39,7 +39,7 @@ private val json = Json { ignoreUnknownKeys = true }
  * 1. Read BOSS_PLUGIN_CLASSPATH — path to the plugin JAR
  * 2. Read META-INF/boss-plugin/plugin.json from the JAR
  * 3. Build a ProcessManifest and register with the kernel
- * 4. Start gRPC server with PluginUIServiceImpl
+ * 4. Dial the kernel's PluginUIService (see PluginUiClient) and start this process's own server
  * 5. Await termination
  */
 fun main() = runBlocking {
@@ -80,19 +80,20 @@ fun main() = runBlocking {
         )
         .build()
 
-    // 4. Connect to kernel and start gRPC server
+    // 4. Connect to kernel
     val connection = bootstrap.connect(processManifest)
-
-    val uiService = PluginUIServiceImpl()
-    connection.processServer.addService(uiService)
 
     // 5. Create RemotePluginContext with kernel channel for data provider access
     //    and a reference to this process's gRPC server so plugins can register
     //    their own services via `ctx.addProcessService(...)` (e.g. the terminal
     //    plugin hosting `TerminalService` for the host's grid renderer).
+    //
+    //    UI is not one of those services: `PluginUIService` is hosted by the KERNEL and dialled
+    //    from here (see PluginUiClient). Adding a UI service to this process's server is what the
+    //    runtime used to do, and it left both ends waiting to be called.
     val remoteContext = RemotePluginContext(
         processId = bootstrap.processId,
-        uiService = uiService,
+        uiService = PluginUiClient(kernelChannel = connection.kernelClient.channel),
         kernelChannel = connection.kernelClient.channel,
         processServer = connection.processServer,
     )

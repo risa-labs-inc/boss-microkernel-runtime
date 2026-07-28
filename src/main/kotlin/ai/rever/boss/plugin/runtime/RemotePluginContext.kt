@@ -65,7 +65,13 @@ import org.slf4j.LoggerFactory
  */
 class RemotePluginContext(
     val processId: String,
-    val uiService: PluginUIServiceImpl,
+    /**
+     * The plugin's client of the kernel's `PluginUIService`.
+     *
+     * Named `uiService` still, because plugin code reads `ctx.uiService.uiEvents` and pushes trees
+     * through it exactly as before — only the direction of the connection underneath changed.
+     */
+    val uiService: PluginUiClient,
     /**
      * Channel to the kernel's gRPC server. Exposed (not private) so OOP state holders
      * that talk to kernel services directly — e.g. the analytics holder subscribing to
@@ -166,13 +172,11 @@ class RemotePluginContext(
     /** Secret management — CRUD for stored credentials. */
     val secretDataProvider: SecretDataProvider = SecretDataProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Supabase proxy — delegated Postgrest and RPC calls. */
     val supabaseDataProvider: SupabaseDataProvider = SupabaseDataProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Split view operations — open tabs and workspaces in split panes. */
@@ -184,7 +188,6 @@ class RemotePluginContext(
     /** Context menu — register and display context menus. */
     val contextMenuProvider: ContextMenuProvider = ContextMenuProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Run configurations — detected main classes, tests, scripts. */
@@ -196,13 +199,11 @@ class RemotePluginContext(
     /** Panel events — close panel and lifecycle events. */
     val panelEventProvider: PanelEventProvider = PanelEventProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Role management — RBAC roles and permissions. */
     val roleManagementProvider: RoleManagementProvider = RoleManagementProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Directory picker — native OS directory selection dialog. */
@@ -248,12 +249,18 @@ class RemotePluginContext(
      *
      * The plugin sends its widget tree via [uiService]; the kernel renders it in the
      * appropriate panel slot. Call this before sending any WidgetUpdates for the surface.
+     *
+     * Returns as soon as the claim is queued — registration is a round trip to the kernel now, so
+     * an update pushed immediately after is buffered until the stream for this surface opens.
+     * Supplying [initialTree] means the surface renders from the moment the kernel accepts it,
+     * instead of showing empty until the plugin's first push.
      */
     fun registerPanel(
         surfaceId: String,
         displayName: String,
         iconName: String = "",
         defaultSlot: String = "",
+        initialTree: ai.rever.boss.ipc.proto.WidgetTree? = null,
     ) {
         logger.info("Registering panel: id={}, name={}, slot={}", surfaceId, displayName, defaultSlot)
         val registration = ai.rever.boss.ipc.proto.UIRegistration.newBuilder()
@@ -263,6 +270,7 @@ class RemotePluginContext(
             .setIconName(iconName)
             .setProcessId(processId)
             .setDefaultSlot(defaultSlot)
+            .apply { initialTree?.let { setInitialTree(it) } }
             .build()
         uiService.registerSurface(registration)
     }
@@ -270,13 +278,18 @@ class RemotePluginContext(
     /**
      * Register a tab type with the kernel via IPC.
      */
-    fun registerTabType(surfaceId: String, displayName: String) {
+    fun registerTabType(
+        surfaceId: String,
+        displayName: String,
+        initialTree: ai.rever.boss.ipc.proto.WidgetTree? = null,
+    ) {
         logger.info("Registering tab type: id={}, name={}", surfaceId, displayName)
         val registration = ai.rever.boss.ipc.proto.UIRegistration.newBuilder()
             .setSurfaceId(surfaceId)
             .setSurfaceType("tab")
             .setDisplayName(displayName)
             .setProcessId(processId)
+            .apply { initialTree?.let { setInitialTree(it) } }
             .build()
         uiService.registerSurface(registration)
     }
@@ -313,6 +326,9 @@ class RemotePluginContext(
      */
     fun dispose() {
         logger.info("RemotePluginContext disposed for process: {}", processId)
+        // Before cancelling the scope: the UI streams run on it, and ending them is what tells the
+        // kernel these surfaces are gone.
+        uiService.close()
         job.cancel()
     }
 }
