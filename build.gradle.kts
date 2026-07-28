@@ -83,6 +83,33 @@ val upstreamJars = listOf(
     "plugin-api-ipc-$contractVersion.jar",
 )
 
+// ─── boss-plugin-api: the plugin API contract itself ───────────────────────
+//
+// `ai.rever.boss.plugin.api.*` — the provider interfaces RemotePluginContext implements — does NOT
+// come from BossConsole. It ships from risa-labs-inc/boss-plugin-api, and BossConsole consumes it
+// the same way (see plugin-platform/plugin-api-core/build.gradle.kts, which filters this jar to that
+// one package). It used to reach us folded into plugin-api-core-<ver>.jar; the plugin-platform
+// decoupling stopped publishing it there, so this repo stopped compiling. Sourcing it directly is
+// what every other plugin already does.
+//
+// Keep the pin equal to BossConsole's `boss-plugin-api` in libs.versions.toml: the host loads this
+// contract into its own classloader, and a child JVM built against a different revision of it is
+// exactly the mismatch the IPC compat gate cannot see.
+val bossPluginApiVersion: String =
+    providers.gradleProperty("boss.plugin.api.version").orElse("1.0.68").get()
+val bossPluginApiJarName = "boss-plugin-api-$bossPluginApiVersion.jar"
+
+// Resolution order mirrors the upstream jars: locally built sibling first (both live under
+// boss_plugins/), then the copy BossConsole already fetched for its own build, then a download.
+val bossPluginApiCandidates =
+    listOf(
+        file("../boss-plugin-api/build/libs/$bossPluginApiJarName"),
+        file("../../BossConsole/plugin-platform/plugin-api-core/build/api-contract/$bossPluginApiJarName"),
+    )
+val bossPluginApiJar: File =
+    bossPluginApiCandidates.firstOrNull { it.exists() }
+        ?: file("build/downloaded-deps/$bossPluginApiJarName")
+
 dependencies {
     // The four IPC-contract jars from BossConsole. compileOnly so they
     // appear on the compile classpath but we control bundling explicitly
@@ -90,6 +117,15 @@ dependencies {
     upstreamJars.forEach { jar ->
         compileOnly(files("$upstreamJarDir/$jar"))
     }
+    compileOnly(files(bossPluginApiJar))
+
+    // Tests need the same contract, and `compileOnly` does not reach the test source set — without
+    // this the suite cannot even be compiled, which is how the transport inversion went unnoticed
+    // here. Runtime too: the tests stand up real gRPC servers against these stubs.
+    upstreamJars.forEach { jar ->
+        testImplementation(files("$upstreamJarDir/$jar"))
+    }
+    testImplementation(files(bossPluginApiJar))
 
     // Transitive runtime libs. Versions match BossConsole's libs.versions.toml.
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
@@ -177,9 +213,48 @@ tasks.register("downloadDeps") {
     }
 }
 
+// ─── downloadApiContract: pull boss-plugin-api from its own release repo ───
+//
+// Separate from downloadDeps because it comes from a different repository: the BossConsole
+// contract jars share one release base URL, this one does not.
+tasks.register("downloadApiContract") {
+    group = "build setup"
+    description = "Download the pinned boss-plugin-api jar (CI / fresh-clone use)."
+    val dest = bossPluginApiJar
+    val version = bossPluginApiVersion
+    val name = bossPluginApiJarName
+    outputs.file(dest)
+    doLast {
+        if (dest.exists() && dest.length() > 0) {
+            logger.lifecycle("✓ already present: ${dest.name} (${dest.length() / 1024} KB)")
+            return@doLast
+        }
+        dest.parentFile.mkdirs()
+        val url = "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v$version/$name"
+        logger.lifecycle("↓ $url")
+        val conn = URI(url).toURL().openConnection().apply {
+            setRequestProperty("User-Agent", "boss-microkernel-runtime-build/1.0")
+            connectTimeout = 30_000
+            readTimeout = 120_000
+        }
+        conn.getInputStream().use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!dest.exists() || dest.length() == 0L) {
+            throw GradleException("Failed to download $name from $url")
+        }
+        logger.lifecycle("  ${dest.length() / 1024} KB")
+    }
+}
+
 tasks.named("compileKotlin") {
     if (!useLocalDependencies) {
         dependsOn("downloadDeps")
+    }
+    // Independent of useLocalDependencies: the API contract has its own resolution order and may
+    // need downloading even when the BossConsole jars are sitting in a sibling checkout.
+    if (!bossPluginApiJar.exists()) {
+        dependsOn("downloadApiContract")
     }
 }
 
@@ -207,6 +282,9 @@ tasks.register<Jar>("fatJar") {
     upstreamJars.forEach { jar ->
         from(zipTree(file("$upstreamJarDir/$jar")))
     }
+    // The API contract too: the child JVM loads these interfaces itself — it does not share the
+    // host's classloader — so leaving them out is a NoClassDefFoundError on the first provider call.
+    from(zipTree(bossPluginApiJar))
     // Everything else from the runtime classpath (kotlinx, slf4j, grpc, netty, protobuf).
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
 }

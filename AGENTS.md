@@ -13,8 +13,9 @@ plugin-context calls back to the kernel.
   to a gRPC proxy under `ai.rever.boss.plugin.ipc.*` (the
   `plugin-api-ipc.jar` upstream dependency).
 - `PluginStateHolder` — MVI base class for plugin state.
-- `PluginUIServiceImpl` — gRPC service that streams the plugin's Compose
-  widget tree to the host.
+- `PluginUiClient` — the plugin's **client** of the host's `PluginUIService`:
+  registers surfaces, streams the widget tree up, reads user events back.
+  The plugin dials the kernel here, not the other way round — see below.
 - `stateholders/` — concrete state holders for each in-house panel plugin.
 
 ## Build
@@ -27,6 +28,19 @@ Compile-time deps come from BossConsole's IPC contract jars:
 - `plugin-api-ipc-<ipcVersion>.jar` — the 19 gRPC proxies
 
 These are published as release assets by BossConsole's CI.
+
+Plus the plugin API contract itself, which comes from a **different** repo:
+
+- `boss-plugin-api-<version>.jar` — `ai.rever.boss.plugin.api.*`, the provider
+  interfaces `RemotePluginContext` implements. Published by
+  risa-labs-inc/boss-plugin-api; pinned by the `boss.plugin.api.version`
+  Gradle property and resolved from a sibling `boss_plugins/boss-plugin-api`
+  checkout, BossConsole's already-fetched copy, or that repo's releases.
+  It used to arrive folded into `plugin-api-core`; the plugin-platform
+  decoupling stopped publishing it there. **Keep the pin equal to
+  BossConsole's `boss-plugin-api` in `libs.versions.toml`** — the host loads
+  this contract into its own classloader, and a mismatch is invisible to the
+  IPC compat gate.
 
 ### Local development
 
@@ -51,6 +65,27 @@ upstream jars from
 
 To pin a specific BossConsole release, pass `-Pupstream.source=...` or
 the `bossconsole_release_tag` workflow input.
+
+## UI transport direction
+
+`ui_protocol.proto` makes the **plugin the client and the kernel the server**,
+in both directions: the plugin calls `RegisterUI`, then opens `StreamUI` and
+sends `WidgetUpdate`s up while reading `UIEvent`s back off the same call.
+
+Do not reintroduce a `PluginUIService` implementation in this process. This repo
+used to have one, and when BossConsole was corrected to serve the contract
+(BossConsole #50) both ends sat waiting to be dialled — no plugin UI connected at
+all, with no error anywhere. `PluginUiClientTest` stands up the kernel's half and
+asserts the plugin dials it, which is the only way that failure is visible from
+this side.
+
+Two `StreamUI` details the client has to respect:
+
+- The call carries no surface id — it binds to the surface of its **first**
+  `WidgetUpdate`, so there is one call per surface and the first message must be
+  a real tree (an update with neither `oneof` arm set is treated as malformed).
+- The call **ending** unregisters the surface. Recovery is register-then-reopen,
+  never a bare reconnect.
 
 ## Versioning
 

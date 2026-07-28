@@ -65,7 +65,13 @@ import org.slf4j.LoggerFactory
  */
 class RemotePluginContext(
     val processId: String,
-    val uiService: PluginUIServiceImpl,
+    /**
+     * The plugin's client of the kernel's `PluginUIService`.
+     *
+     * Named `uiService` still, because plugin code reads `ctx.uiService.uiEvents` and pushes trees
+     * through it exactly as before — only the direction of the connection underneath changed.
+     */
+    val uiService: PluginUiClient,
     /**
      * Channel to the kernel's gRPC server. Exposed (not private) so OOP state holders
      * that talk to kernel services directly — e.g. the analytics holder subscribing to
@@ -166,13 +172,11 @@ class RemotePluginContext(
     /** Secret management — CRUD for stored credentials. */
     val secretDataProvider: SecretDataProvider = SecretDataProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Supabase proxy — delegated Postgrest and RPC calls. */
     val supabaseDataProvider: SupabaseDataProvider = SupabaseDataProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Split view operations — open tabs and workspaces in split panes. */
@@ -184,7 +188,6 @@ class RemotePluginContext(
     /** Context menu — register and display context menus. */
     val contextMenuProvider: ContextMenuProvider = ContextMenuProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Run configurations — detected main classes, tests, scripts. */
@@ -196,13 +199,11 @@ class RemotePluginContext(
     /** Panel events — close panel and lifecycle events. */
     val panelEventProvider: PanelEventProvider = PanelEventProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Role management — RBAC roles and permissions. */
     val roleManagementProvider: RoleManagementProvider = RoleManagementProviderProxy(
         channel = kernelChannel,
-        scope = pluginScope,
     )
 
     /** Directory picker — native OS directory selection dialog. */
@@ -248,6 +249,15 @@ class RemotePluginContext(
      *
      * The plugin sends its widget tree via [uiService]; the kernel renders it in the
      * appropriate panel slot. Call this before sending any WidgetUpdates for the surface.
+     *
+     * Returns as soon as the claim is queued — registration is a round trip to the kernel now, so
+     * an update pushed immediately after is buffered until the stream for this surface opens.
+     *
+     * A surface that wants to render before its first push can build its own `UIRegistration` with
+     * an `initial_tree` and hand it to [uiService] directly. This overload deliberately does not
+     * take one: adding a parameter here changes the JVM descriptor, and plugin JARs are versioned
+     * independently of the runtime, so an already-built plugin calling the old signature would get
+     * a NoSuchMethodError in the child JVM.
      */
     fun registerPanel(
         surfaceId: String,
@@ -270,7 +280,10 @@ class RemotePluginContext(
     /**
      * Register a tab type with the kernel via IPC.
      */
-    fun registerTabType(surfaceId: String, displayName: String) {
+    fun registerTabType(
+        surfaceId: String,
+        displayName: String,
+    ) {
         logger.info("Registering tab type: id={}, name={}", surfaceId, displayName)
         val registration = ai.rever.boss.ipc.proto.UIRegistration.newBuilder()
             .setSurfaceId(surfaceId)
@@ -313,6 +326,11 @@ class RemotePluginContext(
      */
     fun dispose() {
         logger.info("RemotePluginContext disposed for process: {}", processId)
+        // The UI client owns its own scope, so this is not covered by cancelling [job] below —
+        // and ending those streams is the only notice the kernel gets that these surfaces are gone.
+        // Cancelling the calls is enough for that; an UnregisterUI per surface would be a round trip
+        // to a host we are in the middle of disconnecting from.
+        uiService.close()
         job.cancel()
     }
 }
