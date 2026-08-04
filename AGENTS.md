@@ -114,3 +114,5 @@ Two independent versions:
 The store endpoint extracts the manifest from the JAR server-side and
 uses the streaming-computed hash as the integrity anchor; the `sha256`
 in the payload is a sanity check.
+
+<!-- probe: verifying paths-ignore skips prose pushes -->
