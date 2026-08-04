@@ -15,9 +15,21 @@ on:
   # SHA-256 matches the store entry).
   push:
     branches: [main]
+    # Prose changes do not alter the built runtime, so they must not bump the
+    # version and republish. This listed CLAUDE.md and README.md individually,
+    # which missed AGENTS.md: an em-dash sweep touching only that file bumped
+    # 1.0.19 to 1.0.20 and republished a runtime nobody had changed.
+    #
+    # Matches the prose definition used by the shared plugin-release workflow
+    # (risa-labs-inc/BossConsole-Releases). GitHub skips the push only when
+    # EVERY changed file matches, so a commit touching a doc and any source file
+    # still releases.
     paths-ignore:
-      - 'CLAUDE.md'
-      - 'README.md'
+      - '**/*.md'
+      - '**/*.txt'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'NOTICE'
       - '.gitignore'
   workflow_dispatch:
     inputs:
