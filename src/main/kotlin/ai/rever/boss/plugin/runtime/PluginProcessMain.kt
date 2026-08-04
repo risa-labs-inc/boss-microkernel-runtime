@@ -45,6 +45,9 @@ private val json = Json { ignoreUnknownKeys = true }
 fun main() = runBlocking {
     logger.info("Boss plugin runtime starting...")
 
+    // Before anything else: bind this process's lifetime to the host's.
+    installParentDeathWatchdog()
+
     val bootstrap = ChildProcessBootstrap()
 
     // 1. Locate plugin JAR
@@ -164,6 +167,65 @@ fun main() = runBlocking {
 
     // Cleanup
     remoteContext.dispose()
+}
+
+/** Exit code used when this process gives up because its host is gone. */
+internal const val EXIT_ORPHANED = 3
+
+/**
+ * Exit as soon as the host process that spawned this one goes away.
+ *
+ * Nothing else in this process notices a dead host. [ChildProcessConnection.awaitTermination]
+ * blocks on *this* process's own gRPC server, which the host's death does not touch, and the
+ * kernel channel is a gRPC `ManagedChannel` - it answers a dead peer by redialling with backoff
+ * for as long as the JVM lives. So an orphan sits in `awaitTermination` forever, holding ~100
+ * threads and its heap, and reconnecting to nobody. One cohort accumulates per host launch;
+ * 434 of them once held 27 GB and 45k threads on a developer machine.
+ *
+ * The host reaps its children on exit too (`KernelBootstrap`'s shutdown hook). This is the other
+ * half: a hook cannot run when the host is SIGKILLed or dies in native code, and only the child
+ * can cover that case.
+ *
+ * [parent] and [onParentGone] are injectable for tests. Returns true when a watchdog was armed,
+ * false when this process was already orphaned at startup and is being shut down instead.
+ */
+internal fun installParentDeathWatchdog(
+    parent: java.util.Optional<ProcessHandle> = ProcessHandle.current().parent(),
+    onParentGone: () -> Unit = ::haltAsOrphan,
+): Boolean {
+    if (parent.isEmpty) {
+        // Reparented to init/launchd before we even got started, so there is no host to serve.
+        logger.error("No parent process - refusing to run orphaned")
+        onParentGone()
+        return false
+    }
+
+    val host = parent.get()
+    return runCatching {
+        host.onExit().thenRun {
+            logger.warn("Host process {} exited - shutting down", host.pid())
+            onParentGone()
+        }
+        logger.info("Watching host process {} - will exit when it does", host.pid())
+        true
+    }.getOrElse { e ->
+        // Keep serving rather than refuse to start: the host reaps its children on exit too, so
+        // losing the watchdog costs us only the cases that outlive the host's shutdown hook.
+        logger.error("Could not watch host process {} - continuing unwatched", host.pid(), e)
+        false
+    }
+}
+
+/**
+ * Leave immediately, without running shutdown hooks.
+ *
+ * A graceful exit would have to unwind a still-accepting gRPC server and a channel that is
+ * mid-retry, either of which can block exit indefinitely - and there is nothing worth flushing,
+ * because the kernel this process reports to is already gone. The log line above lands first:
+ * stdout and stderr are redirected to files by the host, so they survive the host's own death.
+ */
+private fun haltAsOrphan() {
+    Runtime.getRuntime().halt(EXIT_ORPHANED)
 }
 
 /**
