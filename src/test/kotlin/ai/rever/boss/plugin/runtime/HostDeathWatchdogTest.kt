@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
  * takes a different path for non-children (it cannot reap them, so it polls). A test that
  * watched a spawned child would exercise the wrong half of the JDK and pass regardless.
  */
-class ParentDeathWatchdogTest {
+class HostDeathWatchdogTest {
     private val sleepers = mutableListOf<ProcessHandle>()
 
     @AfterTest
@@ -80,9 +80,9 @@ class ParentDeathWatchdogTest {
         var goneCalls = 0
 
         val armed =
-            installParentDeathWatchdog(
-                parent = Optional.empty(),
-                onParentGone = { goneCalls++ },
+            installHostDeathWatchdog(
+                host = Optional.empty(),
+                onHostGone = { goneCalls++ },
             )
 
         assertFalse(armed, "there is no host to watch, so nothing should be armed")
@@ -95,9 +95,9 @@ class ParentDeathWatchdogTest {
         var goneCalls = 0
 
         val armed =
-            installParentDeathWatchdog(
-                parent = Optional.of(host),
-                onParentGone = { goneCalls++ },
+            installHostDeathWatchdog(
+                host = Optional.of(host),
+                onHostGone = { goneCalls++ },
             )
         assertTrue(armed, "a live host should be watched")
 
@@ -114,13 +114,13 @@ class ParentDeathWatchdogTest {
         val fired = CountDownLatch(1)
 
         assertTrue(
-            installParentDeathWatchdog(parent = Optional.of(host), onParentGone = { fired.countDown() }),
+            installHostDeathWatchdog(host = Optional.of(host), onHostGone = { fired.countDown() }),
         )
 
         host.destroyForcibly()
         assertTrue(
             fired.await(30, TimeUnit.SECONDS),
-            "onParentGone must run once the watched host exits (non-child onExit polls, so allow time)",
+            "onHostGone must run once the watched host exits (non-child onExit polls, so allow time)",
         )
     }
 
@@ -133,7 +133,7 @@ class ParentDeathWatchdogTest {
         host.onExit().get(30, TimeUnit.SECONDS)
 
         val fired = CountDownLatch(1)
-        installParentDeathWatchdog(parent = Optional.of(host), onParentGone = { fired.countDown() })
+        installHostDeathWatchdog(host = Optional.of(host), onHostGone = { fired.countDown() })
 
         assertTrue(fired.await(30, TimeUnit.SECONDS), "a dead host must fire immediately")
     }
@@ -147,13 +147,119 @@ class ParentDeathWatchdogTest {
         var goneCalls = 0
 
         val armed =
-            installParentDeathWatchdog(
-                parent = Optional.of(RefusingHandle),
-                onParentGone = { goneCalls++ },
+            installHostDeathWatchdog(
+                host = Optional.of(RefusingHandle),
+                onHostGone = { goneCalls++ },
             )
 
         assertFalse(armed, "arming failed, so nothing is watching")
         assertEquals(0, goneCalls, "a refusal must not be treated as the host having exited")
+    }
+
+    // ── resolveHostHandle: which process counts as the host ──────────────────────────────────
+    //
+    // This is where the environment is read, and it was the least-tested code in the change. The
+    // pid-1 case below is the one that matters: POSIX reparents an orphan to init, so parent()
+    // hands back a *live* handle for pid 1 rather than an empty Optional. Falling back to it would
+    // arm the watchdog on launchd, which never exits - the process would outlive its host for the
+    // life of the machine, which is the leak this whole change exists to close.
+
+    private fun handleOf(pid: Long): Optional<ProcessHandle> = ProcessHandle.of(pid)
+
+    @Test
+    fun `an unset BOSS_HOST_PID falls back to the OS parent`() {
+        val parent = ProcessHandle.current().parent()
+
+        val resolved = resolveHostHandle(declared = null, osParent = { parent }, selfPid = 4242)
+
+        assertEquals(parent.map { it.pid() }, resolved.map { it.pid() })
+    }
+
+    @Test
+    fun `a live BOSS_HOST_PID wins over the OS parent`() {
+        val host = detachedSleeper()
+
+        val resolved =
+            resolveHostHandle(
+                declared = host.pid().toString(),
+                osParent = { Optional.empty() },
+                selfPid = 4242,
+            )
+
+        assertTrue(resolved.isPresent)
+        assertEquals(host.pid(), resolved.get().pid())
+    }
+
+    @Test
+    fun `a BOSS_HOST_PID naming a dead process means orphaned, not fall back`() {
+        val host = detachedSleeper()
+        host.destroyForcibly()
+        host.onExit().get(30, TimeUnit.SECONDS)
+
+        // The OS parent is deliberately live here: falling back to it would hide a host that told
+        // us who it was and then died.
+        val resolved =
+            resolveHostHandle(
+                declared = host.pid().toString(),
+                osParent = { ProcessHandle.current().parent() },
+                selfPid = 4242,
+            )
+
+        assertFalse(resolved.isPresent, "a named-but-dead host must resolve to orphaned")
+    }
+
+    @Test
+    fun `a malformed BOSS_HOST_PID falls back to the OS parent`() {
+        val parent = ProcessHandle.current().parent()
+
+        listOf("", "   ", "abc", "1234 # comment", "12.5").forEach { garbage ->
+            val resolved = resolveHostHandle(declared = garbage, osParent = { parent }, selfPid = 4242)
+            assertEquals(
+                parent.map { it.pid() },
+                resolved.map { it.pid() },
+                "'$garbage' should warn and fall back, not resolve",
+            )
+        }
+    }
+
+    @Test
+    fun `a BOSS_HOST_PID naming this process falls back instead of watching itself`() {
+        val parent = ProcessHandle.current().parent()
+        val self = ProcessHandle.current().pid()
+
+        val resolved = resolveHostHandle(declared = self.toString(), osParent = { parent }, selfPid = self)
+
+        assertEquals(
+            parent.map { it.pid() },
+            resolved.map { it.pid() },
+            "watching ourselves would throw from onExit and degrade to running unwatched",
+        )
+    }
+
+    @Test
+    fun `an OS parent of pid 1 means orphaned, because POSIX reparents to init`() {
+        // Verified on this platform: an orphan's ppid is 1 and ProcessHandle.of(1) is present and
+        // alive, so parent() returning "empty" is not how being orphaned actually presents.
+        assertTrue(handleOf(1).isPresent, "pid 1 should be resolvable, which is the whole problem")
+
+        val resolved = resolveHostHandle(declared = null, osParent = { handleOf(1) }, selfPid = 4242)
+
+        assertFalse(resolved.isPresent, "init is not a host worth watching - it never exits")
+    }
+
+    @Test
+    fun `a containerised host that is pid 1 can still name itself`() {
+        val resolved = resolveHostHandle(declared = "1", osParent = { Optional.empty() }, selfPid = 4242)
+
+        assertTrue(resolved.isPresent, "an explicit BOSS_HOST_PID=1 is the escape hatch")
+        assertEquals(1L, resolved.get().pid())
+    }
+
+    @Test
+    fun `no OS parent at all still means orphaned`() {
+        val resolved = resolveHostHandle(declared = null, osParent = { Optional.empty() }, selfPid = 4242)
+
+        assertFalse(resolved.isPresent)
     }
 
     /** A handle whose `onExit()` throws, as the JDK's does for the current process. */

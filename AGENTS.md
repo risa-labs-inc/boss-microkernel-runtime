@@ -96,12 +96,23 @@ it answers a dead peer by redialling for as long as the JVM lives. Orphans there
 accumulate one cohort per host launch - 434 of them once held 27 GB and 45k threads on a developer
 machine.
 
-Which process counts as the host:
+Which process counts as the host (`resolveHostHandle`):
 
 1. `BOSS_HOST_PID`, if the host sets it. This makes the relationship a stated contract and survives
-   an intermediate wrapper process.
+   an intermediate wrapper process. If it names a **dead** process the host is gone and we halt - we
+   do *not* fall back, because the host told us who it was.
 2. Otherwise this JVM's **OS parent**, which is correct only while BossConsole spawns the child
    directly - `ProcessSpawner` calls `ProcessBuilder.start()` with no wrapper today.
+
+**An OS parent of pid 1 counts as orphaned, not as a host.** POSIX reparents an orphan to
+init/launchd, so `ProcessHandle.current().parent()` returns a *live pid-1 handle* rather than an
+empty `Optional` - verified on macOS, where an orphan's ppid is 1 and `ProcessHandle.of(1)` resolves
+to `/sbin/launchd`. Watching init would never fire, so the JVM would outlive its host for the life of
+the machine: the leak, through a narrower window. A host that genuinely is pid 1 (containerised) must
+name itself in `BOSS_HOST_PID`, which is checked first and bypasses this rule.
+
+A malformed `BOSS_HOST_PID`, or one naming this very process, warns and falls back to the parent
+rather than failing silently.
 
 If a launcher shell or supervisor is ever introduced between host and child *without* setting
 `BOSS_HOST_PID`, the inferred parent becomes a short-lived process and every plugin halts at startup
