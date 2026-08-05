@@ -87,6 +87,31 @@ Two `StreamUI` details the client has to respect:
 - The call **ending** unregisters the surface. Recovery is register-then-reopen,
   never a bare reconnect.
 
+## Host lifetime is this process's lifetime
+
+`PluginProcessMain` arms a watchdog before it connects and **halts with exit code 3** when the host
+process goes away. Nothing else here would notice: `awaitTermination` blocks on this process's own
+gRPC server, which the host's death does not touch, and the kernel channel is a `ManagedChannel`, so
+it answers a dead peer by redialling for as long as the JVM lives. Orphans therefore used to
+accumulate one cohort per host launch - 434 of them once held 27 GB and 45k threads on a developer
+machine.
+
+Which process counts as the host:
+
+1. `BOSS_HOST_PID`, if the host sets it. This makes the relationship a stated contract and survives
+   an intermediate wrapper process.
+2. Otherwise this JVM's **OS parent**, which is correct only while BossConsole spawns the child
+   directly - `ProcessSpawner` calls `ProcessBuilder.start()` with no wrapper today.
+
+If a launcher shell or supervisor is ever introduced between host and child *without* setting
+`BOSS_HOST_PID`, the inferred parent becomes a short-lived process and every plugin halts at startup
+with exit 3. The host would see immediate child deaths and no plugin UI, which looks nothing like
+its cause - so set `BOSS_HOST_PID` when changing how children are spawned.
+
+The host reaps its children on exit as well (`KernelBootstrap`'s shutdown hook, BossConsole#131).
+Both halves are needed: a shutdown hook cannot run when the host is SIGKILLed or dies in native
+code, and only the child covers that.
+
 ## Versioning
 
 Two independent versions:

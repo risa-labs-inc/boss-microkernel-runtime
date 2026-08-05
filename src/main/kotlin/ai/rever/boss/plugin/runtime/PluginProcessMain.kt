@@ -186,34 +186,63 @@ internal const val EXIT_ORPHANED = 3
  * half: a hook cannot run when the host is SIGKILLed or dies in native code, and only the child
  * can cover that case.
  *
+ * Which process *is* the host is a stated contract where possible and an inference otherwise: the
+ * host may name itself in `BOSS_HOST_PID`, and only failing that do we assume our OS parent. The
+ * distinction matters because the inference holds only while BossConsole spawns this JVM directly,
+ * which it does today (`ProcessSpawner` calls `ProcessBuilder.start()` with no wrapper). Put a
+ * launcher shell or a supervisor in between and the parent becomes a short-lived process, so we
+ * would halt at startup with [EXIT_ORPHANED] - and the host would see an immediate child death with
+ * no plugin UI, a symptom that looks nothing like its cause.
+ *
  * [parent] and [onParentGone] are injectable for tests. Returns true when a watchdog was armed,
- * false when this process was already orphaned at startup and is being shut down instead.
+ * false when this process was already orphaned at startup, or when the JDK refused to let us watch.
  */
 internal fun installParentDeathWatchdog(
-    parent: java.util.Optional<ProcessHandle> = ProcessHandle.current().parent(),
+    parent: java.util.Optional<ProcessHandle> = resolveHostHandle(),
     onParentGone: () -> Unit = ::haltAsOrphan,
 ): Boolean {
     if (parent.isEmpty) {
         // Reparented to init/launchd before we even got started, so there is no host to serve.
-        logger.error("No parent process - refusing to run orphaned")
+        logger.error("No host process - refusing to run orphaned")
         onParentGone()
         return false
     }
 
     val host = parent.get()
-    return runCatching {
+    return try {
         host.onExit().thenRun {
             logger.warn("Host process {} exited - shutting down", host.pid())
             onParentGone()
         }
         logger.info("Watching host process {} - will exit when it does", host.pid())
         true
-    }.getOrElse { e ->
+    } catch (e: Exception) {
+        // Narrow on purpose: this branch means "the JDK would not give us a completion future".
+        // Catching Throwable would report an OutOfMemoryError as a watchdog problem and carry on in
+        // an unknown state.
+        //
         // Keep serving rather than refuse to start: the host reaps its children on exit too, so
         // losing the watchdog costs us only the cases that outlive the host's shutdown hook.
         logger.error("Could not watch host process {} - continuing unwatched", host.pid(), e)
         false
     }
+}
+
+/**
+ * The host process to watch: whoever `BOSS_HOST_PID` names, else our OS parent.
+ *
+ * Preferring the explicit value makes the host relationship a contract rather than a guess, and it
+ * survives an intermediate wrapper process. The fallback keeps this runtime compatible with hosts
+ * that do not set it.
+ */
+private fun resolveHostHandle(): java.util.Optional<ProcessHandle> {
+    val declared = System.getenv("BOSS_HOST_PID")?.trim()?.toLongOrNull()
+    if (declared != null) {
+        val handle = ProcessHandle.of(declared)
+        if (handle.isPresent) return handle
+        logger.warn("BOSS_HOST_PID={} names no live process - falling back to the OS parent", declared)
+    }
+    return ProcessHandle.current().parent()
 }
 
 /**
