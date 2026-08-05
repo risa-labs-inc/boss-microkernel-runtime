@@ -45,6 +45,11 @@ private val json = Json { ignoreUnknownKeys = true }
 fun main() = runBlocking {
     logger.info("Boss plugin runtime starting...")
 
+    // Before anything else: bind this process's lifetime to the host's. The return value is
+    // deliberately ignored - `false` means either that we already halted (no live host) or that we
+    // are knowingly running unwatched because the JDK refused to arm.
+    installHostDeathWatchdog()
+
     val bootstrap = ChildProcessBootstrap()
 
     // 1. Locate plugin JAR
@@ -164,6 +169,145 @@ fun main() = runBlocking {
 
     // Cleanup
     remoteContext.dispose()
+}
+
+/** Exit code used when this process gives up because its host is gone. */
+internal const val EXIT_ORPHANED = 3
+
+/**
+ * pid of init/launchd.
+ *
+ * POSIX reparents an orphan to init, so an orphaned process's parent is pid **1** - a live handle,
+ * not an absent one. Seeing it where a host should be means the host is already gone.
+ */
+private const val INIT_PID = 1L
+
+/**
+ * Exit as soon as the host process that spawned this one goes away.
+ *
+ * Nothing else in this process notices a dead host. [ChildProcessConnection.awaitTermination]
+ * blocks on *this* process's own gRPC server, which the host's death does not touch, and the
+ * kernel channel is a gRPC `ManagedChannel` - it answers a dead peer by redialling with backoff
+ * for as long as the JVM lives. So an orphan sits in `awaitTermination` forever, holding ~100
+ * threads and its heap, and reconnecting to nobody. One cohort accumulates per host launch;
+ * 434 of them once held 27 GB and 45k threads on a developer machine.
+ *
+ * The host reaps its children on exit too (`KernelBootstrap`'s shutdown hook). This is the other
+ * half: a hook cannot run when the host is SIGKILLed or dies in native code, and only the child
+ * can cover that case.
+ *
+ * Which process *is* the host is a stated contract where possible and an inference otherwise: the
+ * host may name itself in `BOSS_HOST_PID`, and only failing that do we assume our OS parent. The
+ * distinction matters because the inference holds only while BossConsole spawns this JVM directly,
+ * which it does today (`ProcessSpawner` calls `ProcessBuilder.start()` with no wrapper). Put a
+ * launcher shell or a supervisor in between and the parent becomes a short-lived process, so we
+ * would halt at startup with [EXIT_ORPHANED] - and the host would see an immediate child death with
+ * no plugin UI, a symptom that looks nothing like its cause.
+ *
+ * [host] and [onHostGone] are injectable for tests. Returns true when a watchdog was armed, false
+ * when there was no live host to watch, or when the JDK refused to let us watch it.
+ */
+internal fun installHostDeathWatchdog(
+    host: java.util.Optional<ProcessHandle> = resolveHostHandle(),
+    onHostGone: () -> Unit = ::haltAsOrphan,
+): Boolean {
+    if (host.isEmpty) {
+        logger.error("No live host process - refusing to run orphaned")
+        onHostGone()
+        return false
+    }
+
+    val handle = host.get()
+    return try {
+        handle.onExit().thenRun {
+            logger.warn("Host process {} exited - shutting down", handle.pid())
+            onHostGone()
+        }
+        logger.info("Watching host process {} - will exit when it does", handle.pid())
+        true
+    } catch (e: Exception) {
+        // Narrow on purpose: this branch means "the JDK would not give us a completion future".
+        // Catching Throwable would report an OutOfMemoryError as a watchdog problem and carry on in
+        // an unknown state.
+        //
+        // Keep serving rather than refuse to start: the host reaps its children on exit too, so
+        // losing the watchdog costs us only the cases that outlive the host's shutdown hook.
+        logger.error("Could not watch host process {} - continuing unwatched", handle.pid(), e)
+        false
+    }
+}
+
+/**
+ * The host process to watch: whoever `BOSS_HOST_PID` names, else our OS parent.
+ *
+ * Preferring the explicit value makes the host relationship a contract rather than a guess, and it
+ * survives an intermediate wrapper process. The fallback keeps this runtime working with hosts that
+ * do not set it.
+ *
+ * Empty means "no host worth watching, treat this process as orphaned". Two cases produce it, and
+ * both used to end in a *live* handle that would never fire:
+ *
+ * - `BOSS_HOST_PID` names a process that is already gone. The host told us who it was and it died;
+ *   guessing at our parent from there is how a dead host becomes a watched init process.
+ * - Our OS parent is [INIT_PID]. POSIX reparents orphans to init, so `parent()` returns a live pid-1
+ *   handle rather than nothing - watching it would never fire and this JVM would outlive its host
+ *   for the life of the machine, which is the leak the watchdog exists to close. A host that
+ *   genuinely is pid 1 (containerised) can still be watched by naming itself in `BOSS_HOST_PID`,
+ *   which returns before this check.
+ *
+ * Parameters exist for tests; production uses the defaults.
+ */
+internal fun resolveHostHandle(
+    declared: String? = System.getenv("BOSS_HOST_PID"),
+    osParent: () -> java.util.Optional<ProcessHandle> = { ProcessHandle.current().parent() },
+    selfPid: Long = ProcessHandle.current().pid(),
+): java.util.Optional<ProcessHandle> {
+    if (declared != null) {
+        val pid = declared.trim().toLongOrNull()
+        when {
+            // Distinguished from unset on purpose: a contract stated wrongly should be loud, and a
+            // quoting slip in a launcher is the likeliest way to get here.
+            pid == null ->
+                logger.warn(
+                    "BOSS_HOST_PID is set but is not a pid: '{}' - falling back to the OS parent",
+                    declared,
+                )
+
+            // onExit() throws for the current process, so without this the mistake would surface as
+            // "the JDK refused" and degrade silently to running unwatched.
+            pid == selfPid ->
+                logger.warn(
+                    "BOSS_HOST_PID={} is this process - a launcher exported the wrong pid; falling back to the OS parent",
+                    pid,
+                )
+
+            else -> {
+                val handle = ProcessHandle.of(pid)
+                if (handle.isPresent) return handle
+                logger.error("BOSS_HOST_PID={} names no live process - the host is already gone", pid)
+                return java.util.Optional.empty()
+            }
+        }
+    }
+
+    val parent = osParent()
+    if (parent.isPresent && parent.get().pid() == INIT_PID) {
+        logger.error("Reparented to init (pid {}) - the host is gone", INIT_PID)
+        return java.util.Optional.empty()
+    }
+    return parent
+}
+
+/**
+ * Leave immediately, without running shutdown hooks.
+ *
+ * A graceful exit would have to unwind a still-accepting gRPC server and a channel that is
+ * mid-retry, either of which can block exit indefinitely - and there is nothing worth flushing,
+ * because the kernel this process reports to is already gone. The log line above lands first:
+ * stdout and stderr are redirected to files by the host, so they survive the host's own death.
+ */
+private fun haltAsOrphan() {
+    Runtime.getRuntime().halt(EXIT_ORPHANED)
 }
 
 /**
