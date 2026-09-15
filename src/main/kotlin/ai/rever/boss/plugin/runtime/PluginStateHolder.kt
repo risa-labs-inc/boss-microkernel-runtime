@@ -1,11 +1,60 @@
 package ai.rever.boss.plugin.runtime
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * State and its version captured together.
+ *
+ * State values must be immutable after publication.
+ */
+internal data class VersionedPluginState<S>(
+    val state: S,
+    val version: Long,
+)
+
+/**
+ * Exposes state values without maintaining a second mutable state store.
+ *
+ * Reads immediately reflect the current snapshot. Collection suppresses equal
+ * state values, preserving the existing state-only StateFlow behavior.
+ */
+@OptIn(
+    InternalCoroutinesApi::class,
+    ExperimentalForInheritanceCoroutinesApi::class,
+)
+private class StateOnlyFlow<S>(
+    private val snapshots: StateFlow<VersionedPluginState<S>>,
+) : StateFlow<S> {
+    override val value: S
+        get() = snapshots.value.state
+
+    override val replayCache: List<S>
+        get() = listOf(value)
+
+    override suspend fun collect(collector: FlowCollector<S>): Nothing {
+        var emitted = false
+        var previous: Any? = null
+
+        return snapshots.collect(
+            object : FlowCollector<VersionedPluginState<S>> {
+                override suspend fun emit(value: VersionedPluginState<S>) {
+                    if (!emitted || previous != value.state) {
+                        emitted = true
+                        previous = value.state
+                        collector.emit(value.state)
+                    }
+                }
+            },
+        )
+    }
+}
 
 /**
  * Base class for plugin state holders used in the split-brain out-of-process model.
@@ -17,7 +66,7 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * When running out-of-process:
  * - The StateHolder lives in the child JVM
- * - State is serialized and sent to the kernel via [PluginStateBridge]
+ * - State is serialized and sent to the kernel via PluginStateBridge
  * - Intents arrive from the kernel via the gRPC state sync stream
  *
  * When running in-process:
@@ -53,7 +102,7 @@ import java.util.concurrent.atomic.AtomicLong
  * }
  * ```
  *
- * @param S The serializable state type
+ * @param S The serializable state type; values must be immutable after publication
  * @param I The intent (user action) type
  * @param E The side effect type (use [Nothing] if no effects)
  */
@@ -61,18 +110,33 @@ abstract class PluginStateHolder<S, I, E>(
     initialState: S,
     protected val scope: CoroutineScope,
 ) {
-    private val _state = MutableStateFlow(initialState)
+    private val _snapshots = MutableStateFlow(
+        VersionedPluginState(state = initialState, version = 0L),
+    )
 
-    /** Current state — collect this from Compose UI or state sync bridge. */
-    val state: StateFlow<S> = _state.asStateFlow()
+    /** State and version published atomically for IPC serialization. */
+    internal val snapshots: StateFlow<VersionedPluginState<S>> =
+        _snapshots.asStateFlow()
 
-    /** Side effects channel for one-shot events the kernel should handle. */
+    /** Current state for existing UI consumers. */
+    val state: StateFlow<S> = StateOnlyFlow(snapshots)
+
+    /** Side effects for the kernel to handle. */
     private val _effects = MutableStateFlow<E?>(null)
     val effects: StateFlow<E?> = _effects.asStateFlow()
 
-    /** Current state version — incremented atomically on every state change. */
-    private val _version = AtomicLong(0)
-    val version: Long get() = _version.get()
+    /**
+     * Current version.
+     *
+     * When the corresponding state is also needed, use [currentSnapshot]
+     * instead of reading state and version separately.
+     */
+    val version: Long
+        get() = _snapshots.value.version
+
+    /** Capture the state and its corresponding version in one read. */
+    internal fun currentSnapshot(): VersionedPluginState<S> =
+        _snapshots.value
 
     /**
      * Handle an intent (user action) from the kernel UI.
@@ -81,25 +145,24 @@ abstract class PluginStateHolder<S, I, E>(
     abstract fun onIntent(intent: I)
 
     /**
-     * Update the state using a transformation function.
-     * Thread-safe: uses StateFlow's atomic update.
-     */
-    /**
-     * Apply [transform] to the current state and publish the result.
+     * Apply [transform] and publish state and version together atomically.
      *
-     * **`update`, not `value = transform(value)`.** The latter is a read-modify-write, so two
-     * interleaved calls silently drop one of them - the loser's `copy()` was computed from a
-     * state that no longer exists by the time it is stored. That was harmless while holders only
-     * ever updated from one place; it stopped being harmless when holders began running a
-     * refresh and a detail fetch on separate coroutines, where the failure is a whole row list
-     * vanishing because a detail write landed between the refresh's read and its store.
+     * Concurrent updates retry against the latest snapshot, preventing lost
+     * updates and mismatched state/version pairs.
      *
-     * [transform] may therefore run more than once under contention, so it must be pure - which
-     * every `copy()`-shaped caller already is.
+     * [transform] may run more than once under contention. It must be pure
+     * and must not mutate previously published state.
+     *
+     * Every successful call advances the version, including when the resulting
+     * state compares equal, preserving the existing version-counter behavior.
      */
     protected fun updateState(transform: S.() -> S) {
-        _state.update { it.transform() }
-        _version.incrementAndGet()
+        _snapshots.update { previous ->
+            VersionedPluginState(
+                state = previous.state.transform(),
+                version = previous.version + 1L,
+            )
+        }
     }
 
     /**
@@ -112,5 +175,5 @@ abstract class PluginStateHolder<S, I, E>(
     /**
      * Get the current state value.
      */
-    fun currentState(): S = _state.value
+    fun currentState(): S = _snapshots.value.state
 }

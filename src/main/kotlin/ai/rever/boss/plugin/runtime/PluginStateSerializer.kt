@@ -48,12 +48,12 @@ class PluginStateSyncService<S, I>(
         }
 
         // Stream state updates to kernel (runs until gRPC cancels the flow)
-        stateHolder.state.collect { state ->
+        stateHolder.snapshots.collect { snapshot ->
             val envelope = PluginStateEnvelope.newBuilder()
                 .setPluginId(pluginId)
                 .setInstanceId(instanceId)
-                .setStateBytes(ByteString.copyFrom(serializeState(state)))
-                .setVersion(stateHolder.version)
+                .setStateBytes(ByteString.copyFrom(serializeState(snapshot.state)))
+                .setVersion(snapshot.version)
                 .setTimestamp(System.currentTimeMillis())
                 .setStateType(stateTypeName)
                 .build()
@@ -67,12 +67,12 @@ class PluginStateSyncService<S, I>(
     }
 
     override suspend fun getCurrentState(request: PluginStateRequest): PluginStateEnvelope {
-        val state = stateHolder.currentState()
+        val snapshot = stateHolder.currentSnapshot()
         return PluginStateEnvelope.newBuilder()
             .setPluginId(pluginId)
             .setInstanceId(instanceId)
-            .setStateBytes(ByteString.copyFrom(serializeState(state)))
-            .setVersion(stateHolder.version)
+            .setStateBytes(ByteString.copyFrom(serializeState(snapshot.state)))
+            .setVersion(snapshot.version)
             .setTimestamp(System.currentTimeMillis())
             .setStateType(stateTypeName)
             .build()
