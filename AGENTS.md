@@ -125,7 +125,10 @@ Which process counts as the host (`resolveHostHandle`):
 
 1. `BOSS_HOST_PID`, if the host sets it. This makes the relationship a stated contract and survives
    an intermediate wrapper process. If it names a **dead** process the host is gone and we halt - we
-   do *not* fall back, because the host told us who it was.
+   do *not* fall back, because the host told us who it was. The runtime also compares process start
+   instants: the real host cannot have started after its child JVM, so a later instant means the pid
+   was recycled after the host died. Equal instants are accepted for platforms with coarse clocks,
+   and missing start metadata preserves the legacy pid-only behaviour.
 2. Otherwise this JVM's **OS parent**, which is correct only while BossConsole spawns the child
    directly - `ProcessSpawner` calls `ProcessBuilder.start()` with no wrapper today.
 
@@ -136,8 +139,10 @@ to `/sbin/launchd`. Watching init would never fire, so the JVM would outlive its
 the machine: the leak, through a narrower window. A host that genuinely is pid 1 (containerised) must
 name itself in `BOSS_HOST_PID`, which is checked first and bypasses this rule.
 
-A malformed `BOSS_HOST_PID`, or one naming this very process, warns and falls back to the parent
-rather than failing silently.
+A blank `BOSS_HOST_PID` is unset. A malformed non-blank value, or one naming this very process,
+warns and falls back to the parent rather than failing silently. Host resolution itself is inside
+the watchdog's fail-open guard: a process-table or environment failure disables this redundant
+watchdog but does not prevent the plugin from starting.
 
 If a launcher shell or supervisor is ever introduced between host and child *without* setting
 `BOSS_HOST_PID`, the inferred parent becomes a short-lived process and every plugin halts at startup
@@ -146,7 +151,18 @@ its cause - so set `BOSS_HOST_PID` when changing how children are spawned.
 
 The host reaps its children on exit as well (`KernelBootstrap`'s shutdown hook, BossConsole#131).
 Both halves are needed: a shutdown hook cannot run when the host is SIGKILLed or dies in native
-code, and only the child covers that.
+code, and only the child covers that. The child uses `Runtime.halt` because its local gRPC server and
+redialling channel may never unwind after host loss; consequently plugin-installed shutdown hooks do
+not run either, and plugins must not rely on them for persistence.
+
+A host that has exited but remains an unreaped POSIX zombie is still alive to `ProcessHandle`;
+`onExit()` fires only when that host is reaped. This is a bounded residual gap owned by the host's
+parent rather than something the child can identify portably.
+
+`HostDeathWatchdogTest` launches a second Java process through a short-lived Java launcher, so the
+watched process is a genuine non-child without depending on `sh` or another platform shell. Keep the
+fixture JDK-only: this suite is intended to prove the same `ProcessHandle.onExit()` path on Windows,
+macOS, and Linux.
 
 ## Versioning
 
