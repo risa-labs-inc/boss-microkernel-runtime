@@ -1,30 +1,27 @@
 package ai.rever.boss.plugin.runtime
 
 import ai.rever.boss.ipc.proto.PluginIntentEnvelope
+import ai.rever.boss.ipc.proto.PluginStateDelta
 import ai.rever.boss.ipc.proto.PluginStateEnvelope
-import ai.rever.boss.ipc.proto.PluginStateServiceGrpcKt
 import ai.rever.boss.ipc.proto.PluginStateRequest
+import ai.rever.boss.ipc.proto.PluginStateServiceGrpcKt
 import ai.rever.boss.ipc.proto.PluginStateUpdate
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 
 /**
- * gRPC service implementation for PluginStateService that bridges a [PluginStateHolder]
- * to the kernel via the state sync protocol.
+ * Bridges a plugin state holder to the kernel over gRPC.
  *
- * Runs inside the plugin child process. Serializes the StateHolder's state into
- * [PluginStateEnvelope] messages and forwards intents from the kernel to the StateHolder.
+ * Each subscription starts with a full snapshot. Later updates use
+ * JSON Merge Patch when representable and smaller than a full message.
+ * Unary snapshot requests always return full state.
  *
- * @param S The state type
- * @param I The intent type
- * @param pluginId The plugin's ID
- * @param instanceId Unique instance identifier
- * @param stateHolder The plugin's state holder
- * @param serializeState Function to serialize state to bytes (typically kotlinx.serialization JSON)
- * @param deserializeIntent Function to deserialize intent from type + bytes
+ * @param serializeState Serializes state to bytes. Unsupported JSON shapes
+ * or non-JSON encodings continue to use full snapshots.
  */
 class PluginStateSyncService<S, I>(
     private val pluginId: String,
@@ -36,45 +33,104 @@ class PluginStateSyncService<S, I>(
     private val scope: CoroutineScope,
 ) : PluginStateServiceGrpcKt.PluginStateServiceCoroutineImplBase() {
 
-    override fun syncState(requests: Flow<PluginIntentEnvelope>): Flow<PluginStateUpdate> = channelFlow {
-        // Forward intents from kernel to state holder
+    override fun syncState(
+        requests: Flow<PluginIntentEnvelope>,
+    ): Flow<PluginStateUpdate> = channelFlow {
+        // These belong to this collection, never to the service instance.
+        var previousState: JsonObject? = null
+        var previousVersion: Long? = null
+
         launch {
             requests.collect { envelope ->
-                val intent = deserializeIntent(envelope.intentType, envelope.payloadBytes.toByteArray())
+                val intent = deserializeIntent(
+                    envelope.intentType,
+                    envelope.payloadBytes.toByteArray(),
+                )
                 if (intent != null) {
                     stateHolder.onIntent(intent)
                 }
             }
         }
 
-        // Stream state updates to kernel (runs until gRPC cancels the flow)
         stateHolder.snapshots.collect { snapshot ->
-            val envelope = PluginStateEnvelope.newBuilder()
-                .setPluginId(pluginId)
-                .setInstanceId(instanceId)
-                .setStateBytes(ByteString.copyFrom(serializeState(snapshot.state)))
-                .setVersion(snapshot.version)
-                .setTimestamp(System.currentTimeMillis())
-                .setStateType(stateTypeName)
+            // Serialize exactly the state belonging to snapshot.version.
+            val stateBytes = serializeState(snapshot.state)
+            val timestamp = System.currentTimeMillis()
+            val currentState = PluginStateMergePatch.parseObject(stateBytes)
+
+            val fullUpdate = PluginStateUpdate.newBuilder()
+                .setFullState(
+                    fullEnvelope(stateBytes, snapshot.version, timestamp),
+                )
                 .build()
 
-            send(
-                PluginStateUpdate.newBuilder()
-                    .setFullState(envelope)
-                    .build()
-            )
+            var update = fullUpdate
+            val baseState = previousState
+            val baseVersion = previousVersion
+
+            if (
+                baseState != null &&
+                currentState != null &&
+                baseVersion != null &&
+                snapshot.version > baseVersion
+            ) {
+                val patchBytes = PluginStateMergePatch.create(
+                    baseState,
+                    currentState,
+                )
+
+                if (patchBytes != null && patchBytes.size < stateBytes.size) {
+                    val deltaUpdate = PluginStateUpdate.newBuilder()
+                        .setDeltaState(
+                            PluginStateDelta.newBuilder()
+                                .setPluginId(pluginId)
+                                .setInstanceId(instanceId)
+                                .setBaseVersion(baseVersion)
+                                .setNewVersion(snapshot.version)
+                                .setPatchBytes(ByteString.copyFrom(patchBytes))
+                                .setTimestamp(timestamp)
+                                .build(),
+                        )
+                        .build()
+
+                    if (deltaUpdate.serializedSize < fullUpdate.serializedSize) {
+                        update = deltaUpdate
+                    }
+                }
+            }
+
+            send(update)
+
+            // Advance only after successful enqueue. This is stream ordering,
+            // not an acknowledgement that the remote receiver applied it.
+            // StateFlow may skip versions; the next base is still this version.
+            previousState = currentState
+            previousVersion = snapshot.version
         }
     }
 
-    override suspend fun getCurrentState(request: PluginStateRequest): PluginStateEnvelope {
+    override suspend fun getCurrentState(
+        request: PluginStateRequest,
+    ): PluginStateEnvelope {
         val snapshot = stateHolder.currentSnapshot()
-        return PluginStateEnvelope.newBuilder()
+        return fullEnvelope(
+            serializeState(snapshot.state),
+            snapshot.version,
+            System.currentTimeMillis(),
+        )
+    }
+
+    private fun fullEnvelope(
+        stateBytes: ByteArray,
+        version: Long,
+        timestamp: Long,
+    ): PluginStateEnvelope =
+        PluginStateEnvelope.newBuilder()
             .setPluginId(pluginId)
             .setInstanceId(instanceId)
-            .setStateBytes(ByteString.copyFrom(serializeState(snapshot.state)))
-            .setVersion(snapshot.version)
-            .setTimestamp(System.currentTimeMillis())
+            .setStateBytes(ByteString.copyFrom(stateBytes))
+            .setVersion(version)
+            .setTimestamp(timestamp)
             .setStateType(stateTypeName)
             .build()
-    }
 }
