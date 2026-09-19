@@ -2,6 +2,8 @@ package ai.rever.boss.plugin.runtime
 
 import ai.rever.boss.plugin.runtime.stateholders.AtlasIntent
 import ai.rever.boss.plugin.runtime.stateholders.AtlasStateHolder
+import ai.rever.boss.plugin.runtime.stateholders.BookmarksIntent
+import ai.rever.boss.plugin.runtime.stateholders.BookmarksStateHolder
 import ai.rever.boss.plugin.runtime.stateholders.DockerIntent
 import ai.rever.boss.plugin.runtime.stateholders.DockerStateHolder
 import ai.rever.boss.plugin.runtime.stateholders.KubernetesIntent
@@ -81,6 +83,18 @@ class IntentDeserializerArmsTest {
         )
 
         assertEquals(ToolCreatorIntent.SetToolName("Invoice Extractor"), decoded)
+    }
+
+    /** The arm whose absence left the bookmarks panel unable to receive any data (#7). */
+    @Test
+    fun `routes bookmarks intents to the bookmarks decoder`() {
+        val decoded = resolveIntentDeserializer(
+            BookmarksStateHolder(scope),
+            "ToggleCollectionExpanded",
+            "c1".toByteArray(),
+        )
+
+        assertEquals(BookmarksIntent.ToggleCollectionExpanded("c1"), decoded)
     }
 
     /**

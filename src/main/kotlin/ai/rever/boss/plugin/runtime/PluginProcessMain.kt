@@ -408,7 +408,7 @@ internal fun resolveIntentDeserializer(
         }
         // A holder with no arm here loads, registers, heartbeats and publishes
         // state — and then silently drops every intent the host sends it, which
-        // looks exactly like a UI whose buttons do nothing. Each of the six
+        // looks exactly like a UI whose buttons do nothing. Each of the seven
         // below owns its decoder next to its intent type.
         is ai.rever.boss.plugin.runtime.stateholders.DockerStateHolder -> {
             ai.rever.boss.plugin.runtime.stateholders.decodeDockerIntent(intentType, payloadStr)
@@ -427,6 +427,12 @@ internal fun resolveIntentDeserializer(
         }
         is ai.rever.boss.plugin.runtime.stateholders.FlowStateHolder -> {
             ai.rever.boss.plugin.runtime.stateholders.decodeFlowIntent(intentType, payloadStr)
+        }
+        // Without this arm the host could not push collections in at all: CollectionsUpdated and
+        // FavoritesUpdated are the only way to populate this holder while there is no bookmark
+        // provider on the wire.
+        is ai.rever.boss.plugin.runtime.stateholders.BookmarksStateHolder -> {
+            ai.rever.boss.plugin.runtime.stateholders.decodeBookmarksIntent(intentType, payloadStr)
         }
         else -> {
             logger.debug("No intent deserializer for {}: {}", stateHolder::class.java.simpleName, intentType)

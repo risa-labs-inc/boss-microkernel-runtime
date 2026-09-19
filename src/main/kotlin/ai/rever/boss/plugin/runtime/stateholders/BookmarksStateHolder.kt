@@ -4,6 +4,10 @@ import ai.rever.boss.plugin.runtime.PluginStateHolder
 import ai.rever.boss.plugin.runtime.RemotePluginContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import org.slf4j.LoggerFactory
 
 // region State
@@ -13,6 +17,20 @@ data class BookmarksState(
     val collections: List<BookmarkCollectionEntry> = emptyList(),
     val favoriteWorkspaces: List<FavoriteWorkspaceEntry> = emptyList(),
     val expandedCollections: Set<String> = emptySet(),
+    /**
+     * True once the holder has published its first state. No collections is a legitimate
+     * answer, so this is what distinguishes "initialised, nothing synced yet" from "no state has
+     * ever arrived".
+     */
+    val ready: Boolean = false,
+    /**
+     * Always false out-of-process: there is no `BookmarkDataProvider` on the wire (no
+     * `bookmark.proto`), so collections reach this holder only as host-pushed
+     * [BookmarksIntent.CollectionsUpdated] / [BookmarksIntent.FavoritesUpdated], and create,
+     * rename and delete change this child's copy only. A renderer should not offer them as if
+     * they persisted.
+     */
+    val persistenceAvailable: Boolean = false,
 )
 
 @Serializable
@@ -79,11 +97,21 @@ class BookmarksStateHolder :
 
     private val logger = LoggerFactory.getLogger(BookmarksStateHolder::class.java)
 
-    constructor(scope: CoroutineScope) : super(BookmarksState(), scope)
+    constructor(scope: CoroutineScope) : super(BookmarksState(), scope) {
+        // Publish an initial versioned state so a host renderer has something to apply on
+        // connect. This holder was the one the rule is named after: it never called
+        // updateState, stayed at version 0, and the host's strictly-newer guard dropped every
+        // envelope, so the panel waited for a first state forever.
+        updateState { copy(ready = true) }
+    }
 
-    constructor(scope: CoroutineScope, context: RemotePluginContext) : super(BookmarksState(), scope) {
-        logger.warn("BookmarksStateHolder: BookmarkDataProvider is not yet available in RemotePluginContext. " +
-                "Bookmarks will not be automatically synchronized.")
+    constructor(scope: CoroutineScope, context: RemotePluginContext) : this(scope) {
+        logger.warn(
+            "BookmarksStateHolder: no BookmarkDataProvider out-of-process (windowId={}). " +
+                "Publishing an empty state; the host must push collections and favorites as " +
+                "CollectionsUpdated / FavoritesUpdated intents.",
+            context.windowId,
+        )
     }
 
     override fun onIntent(intent: BookmarksIntent) {
@@ -185,3 +213,67 @@ class BookmarksStateHolder :
         }
     }
 }
+
+/**
+ * Decode a wire intent for [BookmarksStateHolder], or null to drop it.
+ *
+ * Payload shapes, following the other holders' decoders:
+ * - one id or name: the raw string (`ToggleCollectionExpanded`, `DeleteCollection`,
+ *   `CreateCollection`, `RemoveFavoriteWorkspace`);
+ * - several fields: a JSON object keyed by the intent's property names (`OpenBookmark`,
+ *   `RemoveBookmark` - `collectionId`, `bookmarkId`; `RenameCollection` - `collectionId`,
+ *   `newName`; `AddFavoriteWorkspace` - `id`, `name`);
+ * - the two data-update intents: a JSON array in the same shape as [BookmarksState.collections]
+ *   and [BookmarksState.favoriteWorkspaces] on the wire, so a host can send back exactly what it
+ *   reads. These are how a host drives this holder while there is no bookmark provider.
+ *
+ * A malformed payload is dropped rather than applied in part: a half-decoded CollectionsUpdated
+ * would replace the user's collections with a fragment of them.
+ */
+internal fun decodeBookmarksIntent(intentType: String, payload: String): BookmarksIntent? {
+    val obj = runCatching { bookmarksIntentJson.parseToJsonElement(payload) as? JsonObject }.getOrNull()
+
+    fun str(key: String): String? = obj?.get(key)?.jsonPrimitive?.contentOrNull?.ifBlank { null }
+    fun id(): String? = payload.takeIf { obj == null }?.trim()?.ifBlank { null }
+
+    return when (intentType) {
+        "ToggleCollectionExpanded" -> id()?.let { BookmarksIntent.ToggleCollectionExpanded(it) }
+        "DeleteCollection" -> id()?.let { BookmarksIntent.DeleteCollection(it) }
+        "CreateCollection" -> id()?.let { BookmarksIntent.CreateCollection(it) }
+        "RemoveFavoriteWorkspace" -> id()?.let { BookmarksIntent.RemoveFavoriteWorkspace(it) }
+
+        "OpenBookmark" -> {
+            val collectionId = str("collectionId") ?: return null
+            BookmarksIntent.OpenBookmark(collectionId, str("bookmarkId") ?: return null)
+        }
+
+        "RemoveBookmark" -> {
+            val collectionId = str("collectionId") ?: return null
+            BookmarksIntent.RemoveBookmark(collectionId, str("bookmarkId") ?: return null)
+        }
+
+        "RenameCollection" -> {
+            val collectionId = str("collectionId") ?: return null
+            BookmarksIntent.RenameCollection(collectionId, str("newName") ?: return null)
+        }
+
+        "AddFavoriteWorkspace" -> {
+            val workspaceId = str("id") ?: return null
+            BookmarksIntent.AddFavoriteWorkspace(workspaceId, str("name") ?: return null)
+        }
+
+        "CollectionsUpdated" ->
+            runCatching { bookmarksIntentJson.decodeFromString<List<BookmarkCollectionEntry>>(payload) }
+                .getOrNull()
+                ?.let { BookmarksIntent.CollectionsUpdated(it) }
+
+        "FavoritesUpdated" ->
+            runCatching { bookmarksIntentJson.decodeFromString<List<FavoriteWorkspaceEntry>>(payload) }
+                .getOrNull()
+                ?.let { BookmarksIntent.FavoritesUpdated(it) }
+
+        else -> null
+    }
+}
+
+private val bookmarksIntentJson = Json { ignoreUnknownKeys = true; isLenient = true }
