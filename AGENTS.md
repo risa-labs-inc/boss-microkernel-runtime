@@ -137,7 +137,30 @@ the machine: the leak, through a narrower window. A host that genuinely is pid 1
 name itself in `BOSS_HOST_PID`, which is checked first and bypasses this rule.
 
 A malformed `BOSS_HOST_PID`, or one naming this very process, warns and falls back to the parent
-rather than failing silently.
+rather than failing silently. An **empty** one reads as unset: a launcher exporting a blank variable
+is a no-op, and warning about it would bury the warning that exists for a real quoting slip.
+
+**`BOSS_HOST_START_MS` guards against pid reuse.** A pid is a reusable integer, so between the host
+exporting one and this runtime reading it, the number can belong to something else - and the
+watchdog would then wait on a stranger that may outlive us. Where the host also exports its own
+`startInstant()` as epoch millis, a pid whose process started at a different time resolves to
+orphaned. It is inert until the host sets it, and an unreadable start time (`ProcessHandle.info()`
+is best-effort) accepts the pid rather than refusing to start.
+
+**Known gap: a zombie host.** A host that has exited but has not been reaped stays visible as a
+process, so `onExit()` never fires and the child keeps serving a host that is gone. Nothing here can
+tell that from a live host without reading platform process state, and it ends as soon as anything
+reaps it.
+
+**Resolving the host cannot stop the plugin starting.** It reads the environment and calls into the
+JDK, so it runs inside the same guard as arming: if it throws, the watchdog is lost and the runtime
+keeps serving, because the host still reaps its children. Failing to identify the host is not
+evidence that it died, so it does not halt.
+
+**`halt` skips the plugin's shutdown hooks too**, not just this runtime's. A plugin that persists on
+shutdown loses that write. It is still the right call - a graceful exit can block forever on a gRPC
+server mid-retry, and a plugin JVM that will not die is the failure being prevented - but the cost is
+not paid by this process alone.
 
 If a launcher shell or supervisor is ever introduced between host and child *without* setting
 `BOSS_HOST_PID`, the inferred parent becomes a short-lived process and every plugin halts at startup
