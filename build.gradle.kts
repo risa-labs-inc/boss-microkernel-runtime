@@ -18,7 +18,10 @@
  * incompatible runtime — see `IpcVersion` in boss-ipc and the spawn-time
  * gate in BossConsole's `OutOfProcessPluginSpawnerImpl`.
  */
+import java.io.FileNotFoundException
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 plugins {
@@ -189,10 +192,13 @@ tasks.register("downloadDeps") {
     description = "Download upstream IPC jars from BossConsole release assets (CI / fresh-clone use)."
     val out = file("build/downloaded-deps")
     val jars = upstreamJars
+    // Default: the release pinned by `upstream.release.tag` in gradle.properties, which ships the
+    // boss-ipc jar `ipc.version` names. Not `latest`: the version is pinned, so the release it comes
+    // from has to be too - a newer release that no longer ships this boss-ipc broke every fresh
+    // clone (#26). Override with -Pupstream.source=<any .../releases/download/<tag> URL>.
+    val releaseTag = providers.gradleProperty("upstream.release.tag")
     val source = providers.gradleProperty("upstream.source").orElse(
-        // Default: latest release on the public BossConsole-Releases repo.
-        // Override with -Pupstream.source=https://github.com/.../tag/vX.Y.Z
-        "https://github.com/risa-labs-inc/BossConsole-Releases/releases/latest/download"
+        releaseTag.map { "https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/$it" }
     )
     outputs.dir(out)
     doLast {
@@ -211,12 +217,28 @@ tasks.register("downloadDeps") {
                 connectTimeout = 30_000
                 readTimeout = 120_000
             }
-            conn.getInputStream().use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
+            // Written beside the target and moved into place only when complete: a download cut
+            // off part-way would otherwise leave a truncated jar that the "already present" check
+            // above accepts on every later run.
+            val part = File(out, "$jar.part")
+            try {
+                conn.getInputStream().use { input ->
+                    part.outputStream().use { output -> input.copyTo(output) }
+                }
+            } catch (e: FileNotFoundException) {
+                part.delete()
+                throw GradleException(
+                    "$jar is not in $baseUrl. The release must ship boss-ipc-$bossIpcVersion.jar: " +
+                        "set upstream.release.tag in gradle.properties to a BossConsole-Releases tag " +
+                        "that does, or bump ipc.version to match the release.",
+                    e,
+                )
             }
-            if (!dest.exists() || dest.length() == 0L) {
+            if (part.length() == 0L) {
+                part.delete()
                 throw GradleException("Failed to download $jar from $url")
             }
+            Files.move(part.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
             logger.lifecycle("  ${dest.length() / 1024} KB")
         }
     }

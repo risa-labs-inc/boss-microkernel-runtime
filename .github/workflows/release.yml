@@ -124,7 +124,9 @@ jobs:
         run: |
           set -euo pipefail
           # The downloadDeps task pulls upstream jars from the named tag, or
-          # /releases/latest/download if blank.
+          # /releases/latest/download if blank. `latest` is passed explicitly: the
+          # build's own default is now the tag pinned in gradle.properties (#26), and
+          # a release run may override ipc_version to one only `latest` ships.
           if [[ -n "$UPSTREAM_TAG" ]]; then
             SRC="https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/${UPSTREAM_TAG}"
             ./gradlew fatJar \
@@ -136,6 +138,7 @@ jobs:
             ./gradlew fatJar \
               -Pruntime.version=${{ steps.versions.outputs.runtime_version }} \
               -Pipc.version=${{ steps.versions.outputs.ipc_version }} \
+              -Pupstream.source="https://github.com/risa-labs-inc/BossConsole-Releases/releases/latest/download" \
               --no-daemon
           fi
 
