@@ -189,10 +189,11 @@ tasks.register("downloadDeps") {
     description = "Download upstream IPC jars from BossConsole release assets (CI / fresh-clone use)."
     val out = file("build/downloaded-deps")
     val jars = upstreamJars
+    val compatibleReleaseTag = providers.gradleProperty("bossconsole.release.tag")
     val source = providers.gradleProperty("upstream.source").orElse(
-        // Default: latest release on the public BossConsole-Releases repo.
-        // Override with -Pupstream.source=https://github.com/.../tag/vX.Y.Z
-        "https://github.com/risa-labs-inc/BossConsole-Releases/releases/latest/download"
+        compatibleReleaseTag.map { tag ->
+            "https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/$tag"
+        }
     )
     outputs.dir(out)
     doLast {
