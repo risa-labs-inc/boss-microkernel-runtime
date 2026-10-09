@@ -44,7 +44,7 @@ on:
         required: false
         default: ''
       bossconsole_release_tag:
-        description: 'BossConsole release tag to pull upstream jars from (default: latest)'
+        description: 'BossConsole release tag to pull upstream jars from (defaults to gradle.properties)'
         required: false
         default: ''
 
@@ -123,8 +123,8 @@ jobs:
           UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
         run: |
           set -euo pipefail
-          # The downloadDeps task pulls upstream jars from the named tag, or
-          # /releases/latest/download if blank.
+          # The downloadDeps task pulls upstream jars from the named tag, or the
+          # compatible bossconsole.release.tag in gradle.properties if blank.
           if [[ -n "$UPSTREAM_TAG" ]]; then
             SRC="https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/${UPSTREAM_TAG}"
             ./gradlew fatJar \

@@ -192,13 +192,21 @@ tasks.register("downloadDeps") {
     val compatibleReleaseTag = providers.gradleProperty("bossconsole.release.tag")
     val source = providers.gradleProperty("upstream.source").orElse(
         compatibleReleaseTag.map { tag ->
+            if (tag.isBlank()) {
+                throw GradleException(
+                    "Set bossconsole.release.tag in gradle.properties or pass -Pupstream.source",
+                )
+            }
             "https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/$tag"
         }
     )
     outputs.dir(out)
     doLast {
         out.mkdirs()
-        val baseUrl = source.get().trimEnd('/')
+        val baseUrl = source.orNull?.trimEnd('/')
+            ?: throw GradleException(
+                "Set bossconsole.release.tag in gradle.properties or pass -Pupstream.source",
+            )
         jars.forEach { jar ->
             val dest = File(out, jar)
             if (dest.exists() && dest.length() > 0) {
@@ -261,11 +269,10 @@ tasks.named("compileKotlin") {
     if (!useLocalDependencies) {
         dependsOn("downloadDeps")
     }
-    // Independent of useLocalDependencies: the API contract has its own resolution order and may
-    // need downloading even when the BossConsole jars are sitting in a sibling checkout.
-    if (!bossPluginApiJar.exists()) {
-        dependsOn("downloadApiContract")
-    }
+    // Always wire the task. Checking file existence during configuration is incorrect for
+    // `clean build`: the jar may exist while the graph is assembled and then be deleted by clean
+    // before compilation starts. The task itself is a no-op when a sibling/local jar is present.
+    dependsOn("downloadApiContract")
 }
 
 // ─── fatJar: bundle runtime classes + upstream + transitive runtime libs ──
