@@ -40,11 +40,11 @@ on:
         type: choice
         options: [patch, minor, major, none]
       ipc_version:
-        description: 'IPC contract version to consume (defaults to gradle.properties)'
+        description: 'IPC contract version (set the matching BossConsole release tag too)'
         required: false
         default: ''
       bossconsole_release_tag:
-        description: 'BossConsole release tag to pull upstream jars from (default: latest)'
+        description: 'BossConsole release tag to pull upstream jars from (defaults to gradle.properties)'
         required: false
         default: ''
 
@@ -62,6 +62,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Validate every coupled input before the version-bump step mutates and pushes main.
+      - name: Validate release inputs
+        env:
+          IPC_VERSION_INPUT: ${{ inputs.ipc_version }}
+          UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$IPC_VERSION_INPUT" && -z "$UPSTREAM_TAG" ]]; then
+            echo "::error::bossconsole_release_tag is required when overriding ipc_version"
+            exit 1
+          fi
 
       - name: Bump runtime version in plugin.json
         # On push: always patch-bump so same-version re-publish doesn't 400
@@ -95,11 +107,13 @@ jobs:
 
       - name: Resolve versions
         id: versions
+        env:
+          IPC_VERSION_INPUT: ${{ inputs.ipc_version }}
         run: |
           set -euo pipefail
           MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
           RUNTIME_VERSION=$(jq -r '.version' "$MANIFEST")
-          IPC_VERSION="${{ inputs.ipc_version }}"
+          IPC_VERSION="$IPC_VERSION_INPUT"
           if [[ -z "$IPC_VERSION" ]]; then
             IPC_VERSION=$(grep '^ipc.version=' gradle.properties | cut -d= -f2)
           fi
@@ -123,8 +137,8 @@ jobs:
           UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
         run: |
           set -euo pipefail
-          # The downloadDeps task pulls upstream jars from the named tag, or
-          # /releases/latest/download if blank.
+          # The downloadDeps task pulls upstream jars from the named tag, or the
+          # compatible bossconsole.release.tag in gradle.properties if blank.
           if [[ -n "$UPSTREAM_TAG" ]]; then
             SRC="https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/${UPSTREAM_TAG}"
             ./gradlew fatJar \

@@ -1,13 +1,15 @@
 package ai.rever.boss.plugin.runtime.stateholders
 
+import ai.rever.boss.plugin.runtime.StateWireJson
 import ai.rever.boss.plugin.runtime.stateholders.ToolCreatorStateHolder.Companion.derive
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.AfterTest
-import ai.rever.boss.plugin.runtime.StateWireJson
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -27,6 +29,75 @@ import kotlin.test.assertTrue
  * fires when the templates are absent — which is the situation in this suite.
  */
 class ToolCreatorStateHolderTest {
+    @Test
+    fun `default tool workspace is contained beneath boss`() {
+        val home = Files.createTempDirectory("tool-creator-oop-home")
+        try {
+            val workspace = Path.of(ToolCreatorStateHolder.defaultParentDir(home.toString()))
+
+            val expected = home.resolve(".boss/workspaces/tools").toAbsolutePath()
+            assertEquals(expected, workspace)
+            assertTrue(Files.isDirectory(workspace))
+        } finally {
+            home.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `blank home degrades without throwing`() {
+        assertEquals("", ToolCreatorStateHolder.defaultParentDir(""))
+    }
+
+    @Test
+    fun `unavailable boss path does not prevent initial state publication`() {
+        val home = Files.createTempDirectory("tool-creator-oop-blocked-home")
+        try {
+            home.resolve(".boss").toFile().writeText("not a directory")
+
+            val holder = ToolCreatorStateHolder.createForHome(scope, home.toString())
+            val expected = home.resolve(".boss/workspaces/tools").toAbsolutePath().toString()
+
+            assertTrue(holder.version > 0, "an unavailable default must not suppress the first publication")
+            assertTrue(holder.currentState().ready)
+            assertEquals(expected, holder.currentState().form.parentDir)
+            assertFalse(Files.exists(Path.of(expected)))
+        } finally {
+            home.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `symlinked workspace root remains usable`() {
+        val home = Files.createTempDirectory("tool-creator-oop-symlink-home")
+        val external = Files.createTempDirectory("tool-creator-oop-external-workspaces")
+        try {
+            val bossRoot = Files.createDirectories(home.resolve(".boss"))
+            Files.createSymbolicLink(bossRoot.resolve("workspaces"), external)
+
+            val workspace = Path.of(ToolCreatorStateHolder.defaultParentDir(home.toString()))
+
+            assertEquals(home.resolve(".boss/workspaces/tools").toAbsolutePath(), workspace)
+            assertEquals(external.resolve("tools").toRealPath(), workspace.toRealPath())
+        } finally {
+            external.toFile().deleteRecursively()
+            home.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `project path parent takes precedence over the boss default`() {
+        val home = Files.createTempDirectory("tool-creator-oop-project-home")
+        try {
+            val project = home.resolve("projects/current-repo")
+
+            val parent = ToolCreatorStateHolder.initialParentDir(project.toString(), home.toString())
+
+            assertEquals(project.parent.toString(), parent)
+            assertFalse(Files.exists(home.resolve(".boss")), "the unused default must not be created")
+        } finally {
+            home.toFile().deleteRecursively()
+        }
+    }
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 

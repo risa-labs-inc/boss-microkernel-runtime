@@ -189,15 +189,24 @@ tasks.register("downloadDeps") {
     description = "Download upstream IPC jars from BossConsole release assets (CI / fresh-clone use)."
     val out = file("build/downloaded-deps")
     val jars = upstreamJars
+    val compatibleReleaseTag = providers.gradleProperty("bossconsole.release.tag")
     val source = providers.gradleProperty("upstream.source").orElse(
-        // Default: latest release on the public BossConsole-Releases repo.
-        // Override with -Pupstream.source=https://github.com/.../tag/vX.Y.Z
-        "https://github.com/risa-labs-inc/BossConsole-Releases/releases/latest/download"
+        compatibleReleaseTag.map { tag ->
+            if (tag.isBlank()) {
+                throw GradleException(
+                    "Set bossconsole.release.tag in gradle.properties or pass -Pupstream.source",
+                )
+            }
+            "https://github.com/risa-labs-inc/BossConsole-Releases/releases/download/$tag"
+        }
     )
     outputs.dir(out)
     doLast {
         out.mkdirs()
-        val baseUrl = source.get().trimEnd('/')
+        val baseUrl = source.orNull?.trimEnd('/')
+            ?: throw GradleException(
+                "Set bossconsole.release.tag in gradle.properties or pass -Pupstream.source",
+            )
         jars.forEach { jar ->
             val dest = File(out, jar)
             if (dest.exists() && dest.length() > 0) {
@@ -260,11 +269,16 @@ tasks.named("compileKotlin") {
     if (!useLocalDependencies) {
         dependsOn("downloadDeps")
     }
-    // Independent of useLocalDependencies: the API contract has its own resolution order and may
-    // need downloading even when the BossConsole jars are sitting in a sibling checkout.
-    if (!bossPluginApiJar.exists()) {
-        dependsOn("downloadApiContract")
-    }
+    // Always wire the task. Checking file existence during configuration is incorrect for
+    // `clean build`: the jar may exist while the graph is assembled and then be deleted by clean
+    // before compilation starts. The task itself is a no-op when a sibling/local jar is present.
+    dependsOn("downloadApiContract")
+}
+
+tasks.withType<Test>().configureEach {
+    // Tool Creator creates its default workspace eagerly so the initial form is valid. Keep that
+    // state inside the disposable build tree; tests must never write to a developer's real home.
+    systemProperty("user.home", layout.buildDirectory.dir("test-home").get().asFile.absolutePath)
 }
 
 // ─── fatJar: bundle runtime classes + upstream + transitive runtime libs ──

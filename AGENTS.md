@@ -34,7 +34,7 @@ plugin-context calls back to the kernel.
 ## Tests
 
 ```bash
-./gradlew test    # 254 tests
+./gradlew test    # 261 tests
 ```
 
 The four upstream jars are on the **test** compile classpath too
@@ -84,9 +84,10 @@ cp build/libs/boss-microkernel-runtime-*-all.jar ~/.boss/plugins/
 ### CI
 
 CI sets `CI=true`, which makes `build.gradle.kts` skip the local-deps
-branch and run the `downloadDeps` task instead - that pulls the four
-upstream jars from
-`https://github.com/risa-labs-inc/BossConsole-Releases/releases/latest/download/`.
+branch and run the `downloadDeps` task instead. That pulls the four
+upstream jars from the compatible BossConsole release pinned by
+`bossconsole.release.tag` in `gradle.properties`; following `latest` is unsafe
+because a newer host may publish a different IPC asset name.
 
 To pin a specific BossConsole release, pass `-Pupstream.source=...` or
 the `bossconsole_release_tag` workflow input.

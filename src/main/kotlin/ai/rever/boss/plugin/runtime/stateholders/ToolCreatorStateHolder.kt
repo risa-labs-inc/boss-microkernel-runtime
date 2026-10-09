@@ -246,10 +246,10 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
 
     private var jobCounter = 1L
 
-    constructor(scope: CoroutineScope) : this(scope, defaultParentDir())
+    constructor(scope: CoroutineScope) : this(scope, initialParentDir(projectPath = null))
 
     constructor(scope: CoroutineScope, context: RemotePluginContext) :
-        this(scope, context.projectPath?.let { File(it).parent } ?: defaultParentDir()) {
+        this(scope, initialParentDir(context.projectPath)) {
         logger.info(
             "ToolCreatorStateHolder started (terminal handoff and GitHub unavailable out-of-process)",
         )
@@ -487,7 +487,7 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
         }
         val newest = candidates.maxByOrNull { versionKey(it.name) }
         if (newest == null) {
-            log("Warning: no boss-plugin-api jar found — local builds need ../boss-plugin-api or libs/")
+            log("Warning: no boss-plugin-api jar found — install it in ~/.boss/plugins, ~/.boss_debug/plugins, or libs/")
             return
         }
         val libs = File(dir, "libs").apply { mkdirs() }
@@ -588,10 +588,39 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
                 .filter { it.isNotBlank() }
         }
 
-        internal fun defaultParentDir(): String =
-            File(System.getProperty("user.home").orEmpty(), "Development/Boss/boss_plugins")
-                .takeIf { it.isDirectory }?.absolutePath
-                ?: System.getProperty("user.home").orEmpty()
+        internal fun defaultParentDir(userHome: String): String {
+            if (userHome.isBlank()) return ""
+
+            // This runs before the holder's first state publication, so an unavailable home must
+            // degrade into the form's existing "Location does not exist" validation rather than
+            // killing the child process. Keep the lexical ~/.boss default even when creation fails;
+            // symlinked workspace roots are an intentional user configuration and remain valid.
+            val toolsPath = File(userHome, ".boss/workspaces/tools")
+            val tools = runCatching { toolsPath.absoluteFile }.getOrElse { error ->
+                LoggerFactory.getLogger(ToolCreatorStateHolder::class.java)
+                    .warn("Could not resolve BOSS tool workspace {}", toolsPath, error)
+                return toolsPath.path
+            }
+            runCatching {
+                // Create eagerly so the initial form is immediately valid on a normal home.
+                if (!tools.isDirectory && !tools.mkdirs()) {
+                    LoggerFactory.getLogger(ToolCreatorStateHolder::class.java)
+                        .warn("Could not create BOSS tool workspace {}", tools)
+                }
+            }.onFailure { error ->
+                LoggerFactory.getLogger(ToolCreatorStateHolder::class.java)
+                    .warn("Could not prepare BOSS tool workspace {}", tools, error)
+            }
+            return tools.absolutePath
+        }
+
+        internal fun createForHome(scope: CoroutineScope, userHome: String): ToolCreatorStateHolder =
+            ToolCreatorStateHolder(scope, defaultParentDir(userHome))
+
+        internal fun initialParentDir(
+            projectPath: String?,
+            userHome: String = System.getProperty("user.home").orEmpty(),
+        ): String = projectPath?.let { File(it).parent } ?: defaultParentDir(userHome)
 
         /**
          * Derive every name from [ToolCreatorForm.toolName] and validate, applying
