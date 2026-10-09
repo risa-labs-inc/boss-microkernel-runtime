@@ -588,10 +588,15 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
                 .filter { it.isNotBlank() }
         }
 
-        internal fun defaultParentDir(): String =
-            File(System.getProperty("user.home").orEmpty(), "Development/Boss/boss_plugins")
-                .takeIf { it.isDirectory }?.absolutePath
-                ?: System.getProperty("user.home").orEmpty()
+        internal fun defaultParentDir(): String = defaultParentDir(System.getProperty("user.home").orEmpty())
+
+        internal fun defaultParentDir(userHome: String): String {
+            val bossRoot = File(userHome, ".boss").canonicalFile
+            val tools = File(bossRoot, "workspaces/tools").canonicalFile
+            require(tools.toPath().startsWith(bossRoot.toPath())) { "tool workspace escaped the BOSS root" }
+            check(tools.exists() || tools.mkdirs()) { "Could not create BOSS tool workspace: $tools" }
+            return tools.absolutePath
+        }
 
         /**
          * Derive every name from [ToolCreatorForm.toolName] and validate, applying

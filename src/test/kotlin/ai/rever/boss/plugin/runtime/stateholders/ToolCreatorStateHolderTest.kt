@@ -14,6 +14,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import java.nio.file.Files
 
 /**
  * Tests for [ToolCreatorStateHolder] — the scaffold surface an out-of-process
@@ -27,6 +28,18 @@ import kotlin.test.assertTrue
  * fires when the templates are absent — which is the situation in this suite.
  */
 class ToolCreatorStateHolderTest {
+    @Test
+    fun `default tool workspace is contained beneath boss`() {
+        val home = Files.createTempDirectory("tool-creator-oop-home")
+
+        val workspace = java.nio.file.Path.of(ToolCreatorStateHolder.defaultParentDir(home.toString()))
+
+        val expectedRoot = home.resolve(".boss").toFile().canonicalFile.toPath()
+        assertEquals(expectedRoot.resolve("workspaces/tools"), workspace)
+        assertTrue(workspace.startsWith(expectedRoot))
+        assertTrue(Files.isDirectory(workspace))
+    }
+
 
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
