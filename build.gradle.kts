@@ -275,6 +275,12 @@ tasks.named("compileKotlin") {
     dependsOn("downloadApiContract")
 }
 
+tasks.withType<Test>().configureEach {
+    // Tool Creator creates its default workspace eagerly so the initial form is valid. Keep that
+    // state inside the disposable build tree; tests must never write to a developer's real home.
+    systemProperty("user.home", layout.buildDirectory.dir("test-home").get().asFile.absolutePath)
+}
+
 // ─── fatJar: bundle runtime classes + upstream + transitive runtime libs ──
 tasks.jar {
     manifest {

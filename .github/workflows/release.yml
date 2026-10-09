@@ -63,6 +63,18 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Validate every coupled input before the version-bump step mutates and pushes main.
+      - name: Validate release inputs
+        env:
+          IPC_VERSION_INPUT: ${{ inputs.ipc_version }}
+          UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$IPC_VERSION_INPUT" && -z "$UPSTREAM_TAG" ]]; then
+            echo "::error::bossconsole_release_tag is required when overriding ipc_version"
+            exit 1
+          fi
+
       - name: Bump runtime version in plugin.json
         # On push: always patch-bump so same-version re-publish doesn't 400
         # against the plugin store. On dispatch: use the user's choice and
@@ -97,16 +109,11 @@ jobs:
         id: versions
         env:
           IPC_VERSION_INPUT: ${{ inputs.ipc_version }}
-          UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
         run: |
           set -euo pipefail
           MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
           RUNTIME_VERSION=$(jq -r '.version' "$MANIFEST")
           IPC_VERSION="$IPC_VERSION_INPUT"
-          if [[ -n "$IPC_VERSION" && -z "$UPSTREAM_TAG" ]]; then
-            echo "::error::bossconsole_release_tag is required when overriding ipc_version"
-            exit 1
-          fi
           if [[ -z "$IPC_VERSION" ]]; then
             IPC_VERSION=$(grep '^ipc.version=' gradle.properties | cut -d= -f2)
           fi
