@@ -40,7 +40,7 @@ on:
         type: choice
         options: [patch, minor, major, none]
       ipc_version:
-        description: 'IPC contract version to consume (defaults to gradle.properties)'
+        description: 'IPC contract version (set the matching BossConsole release tag too)'
         required: false
         default: ''
       bossconsole_release_tag:
@@ -100,6 +100,11 @@ jobs:
           MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
           RUNTIME_VERSION=$(jq -r '.version' "$MANIFEST")
           IPC_VERSION="${{ inputs.ipc_version }}"
+          UPSTREAM_TAG="${{ inputs.bossconsole_release_tag }}"
+          if [[ -n "$IPC_VERSION" && -z "$UPSTREAM_TAG" ]]; then
+            echo "::error::bossconsole_release_tag is required when overriding ipc_version"
+            exit 1
+          fi
           if [[ -z "$IPC_VERSION" ]]; then
             IPC_VERSION=$(grep '^ipc.version=' gradle.properties | cut -d= -f2)
           fi

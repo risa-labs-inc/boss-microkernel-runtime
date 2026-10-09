@@ -79,8 +79,23 @@ class ToolCreatorStateHolderTest {
             assertEquals(home.resolve(".boss/workspaces/tools").toAbsolutePath(), workspace)
             assertEquals(external.resolve("tools").toRealPath(), workspace.toRealPath())
         } finally {
-            home.toFile().deleteRecursively()
             external.toFile().deleteRecursively()
+            home.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `project path parent takes precedence over the boss default`() {
+        val home = Files.createTempDirectory("tool-creator-oop-project-home")
+        try {
+            val project = home.resolve("projects/current-repo")
+
+            val parent = ToolCreatorStateHolder.initialParentDir(project.toString(), home.toString())
+
+            assertEquals(project.parent.toString(), parent)
+            assertFalse(Files.exists(home.resolve(".boss")), "the unused default must not be created")
+        } finally {
+            home.toFile().deleteRecursively()
         }
     }
 

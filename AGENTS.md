@@ -34,7 +34,7 @@ plugin-context calls back to the kernel.
 ## Tests
 
 ```bash
-./gradlew test    # 260 tests
+./gradlew test    # 261 tests
 ```
 
 The four upstream jars are on the **test** compile classpath too

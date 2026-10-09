@@ -246,10 +246,10 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
 
     private var jobCounter = 1L
 
-    constructor(scope: CoroutineScope) : this(scope, defaultParentDir())
+    constructor(scope: CoroutineScope) : this(scope, initialParentDir(projectPath = null))
 
     constructor(scope: CoroutineScope, context: RemotePluginContext) :
-        this(scope, context.projectPath?.let { File(it).parent } ?: defaultParentDir()) {
+        this(scope, initialParentDir(context.projectPath)) {
         logger.info(
             "ToolCreatorStateHolder started (terminal handoff and GitHub unavailable out-of-process)",
         )
@@ -588,8 +588,6 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
                 .filter { it.isNotBlank() }
         }
 
-        internal fun defaultParentDir(): String = defaultParentDir(System.getProperty("user.home").orEmpty())
-
         internal fun defaultParentDir(userHome: String): String {
             if (userHome.isBlank()) return ""
 
@@ -604,6 +602,7 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
                 return toolsPath.path
             }
             runCatching {
+                // Create eagerly so the initial form is immediately valid on a normal home.
                 if (!tools.isDirectory && !tools.mkdirs()) {
                     LoggerFactory.getLogger(ToolCreatorStateHolder::class.java)
                         .warn("Could not create BOSS tool workspace {}", tools)
@@ -617,6 +616,11 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
 
         internal fun createForHome(scope: CoroutineScope, userHome: String): ToolCreatorStateHolder =
             ToolCreatorStateHolder(scope, defaultParentDir(userHome))
+
+        internal fun initialParentDir(
+            projectPath: String?,
+            userHome: String = System.getProperty("user.home").orEmpty(),
+        ): String = projectPath?.let { File(it).parent } ?: defaultParentDir(userHome)
 
         /**
          * Derive every name from [ToolCreatorForm.toolName] and validate, applying
