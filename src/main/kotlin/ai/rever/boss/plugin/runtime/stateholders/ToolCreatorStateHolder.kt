@@ -487,7 +487,7 @@ class ToolCreatorStateHolder : PluginStateHolder<ToolCreatorState, ToolCreatorIn
         }
         val newest = candidates.maxByOrNull { versionKey(it.name) }
         if (newest == null) {
-            log("Warning: no boss-plugin-api jar found — install it in ~/.boss/plugins or add it to libs/")
+            log("Warning: no boss-plugin-api jar found — install it in ~/.boss/plugins, ~/.boss_debug/plugins, or libs/")
             return
         }
         val libs = File(dir, "libs").apply { mkdirs() }

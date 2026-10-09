@@ -95,12 +95,14 @@ jobs:
 
       - name: Resolve versions
         id: versions
+        env:
+          IPC_VERSION_INPUT: ${{ inputs.ipc_version }}
+          UPSTREAM_TAG: ${{ inputs.bossconsole_release_tag }}
         run: |
           set -euo pipefail
           MANIFEST="src/main/resources/META-INF/boss-plugin/plugin.json"
           RUNTIME_VERSION=$(jq -r '.version' "$MANIFEST")
-          IPC_VERSION="${{ inputs.ipc_version }}"
-          UPSTREAM_TAG="${{ inputs.bossconsole_release_tag }}"
+          IPC_VERSION="$IPC_VERSION_INPUT"
           if [[ -n "$IPC_VERSION" && -z "$UPSTREAM_TAG" ]]; then
             echo "::error::bossconsole_release_tag is required when overriding ipc_version"
             exit 1
